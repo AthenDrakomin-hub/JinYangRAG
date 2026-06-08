@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Jin Yang RAG - 网页知识库问答助手",
+  "version": "1.0.0",
+  "description": "基于 Gemini API 的智能网页问答助手，可提取当前活动标签页内容，在本地进行切片(Chunking)与 RAG 检索，为您提供精准、不凭空捏造的答案。",
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Jin Yang RAG Panel"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"]
+    }
+  ]
+}

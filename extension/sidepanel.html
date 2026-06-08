@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Jin Yang RAG - 侧边问答面板</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container" id="app">
+    <!-- 头部栏 -->
+    <header>
+      <div class="brand">
+        <div class="logo-icon-container">
+          <svg class="jy-logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="jy-bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#1e293b" />
+                <stop offset="100%" stop-color="#0f172a" />
+              </linearGradient>
+              <linearGradient id="jy-mint-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#34d399" />
+                <stop offset="100%" stop-color="#059669" />
+              </linearGradient>
+              <linearGradient id="jy-slate-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#f1f5f9" />
+                <stop offset="100%" stop-color="#94a3b8" />
+              </linearGradient>
+              <filter id="jy-glow" x="-20%" y="-20%" width="140%" height="140%">
+                <feGaussianBlur stdDeviation="2.5" result="blur" />
+                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+              </filter>
+            </defs>
+            <circle cx="50" cy="50" r="46" fill="url(#jy-bg-grad)" stroke="url(#jy-mint-grad)" stroke-width="2.5" />
+            <circle cx="50" cy="50" r="41" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="3 3" />
+            <path d="M 35 32 V 53 A 7 7 0 0 1 28 60 A 7 7 0 0 1 21 53" fill="none" stroke="url(#jy-slate-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M 47 32 L 56 45" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" />
+            <path d="M 65 32 L 56 45 L 70 59" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="75" cy="64" r="6.5" fill="none" stroke="url(#jy-mint-grad)" stroke-width="4.5" />
+            <circle cx="75" cy="64" r="2" fill="#fff" filter="url(#jy-glow)" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="title">Jin Yang RAG</h1>
+          <span class="subtitle">网页知识库问答助手 (SidePanel)</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="toggle-settings-btn" class="btn-icon" title="API 密钥配置">
+          <!-- 齿轮图标 -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <button id="clear-chat-btn" class="btn-icon" title="清除对话目录">
+          <!-- 垃圾桶图标 -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- 配置抽屉 (可快捷更改服务端 URL 或者是本机的 API KEY) -->
+    <div id="settings-panel" class="settings-panel">
+      <div class="settings-group">
+        <label class="settings-label" for="setting-api-url">开发版服务代理 API 后台端点</label>
+        <input class="settings-input" id="setting-api-url" type="url" placeholder="默认使用主系统的 /api/rag">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-api-key">自定义 Gemini API 密钥 (可选，覆盖默认端点)</label>
+        <input class="settings-input" id="setting-api-key" type="password" placeholder="AI Studio 已在服务器底层安全挂载，此项选填">
+      </div>
+      <div style="text-align: right; margin-top: 4px;">
+        <button id="save-settings-btn" class="btn-primary" style="padding: 4px 10px; font-size: 11px;">保存配置</button>
+      </div>
+    </div>
+
+    <!-- 当前加载的文章/标签页提示 -->
+    <div class="webpage-indicator">
+      <div class="indicator-left">
+        <span class="status-dot"></span>
+        <span class="page-title" id="webpage-name">正在检测当前标签页文本...</span>
+      </div>
+      <button id="refresh-page-btn" class="btn-icon" style="width: 22px; height: 22px;" title="重新提取并分块">
+        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+      </button>
+    </div>
+
+    <!-- 聊天主视窗 -->
+    <div class="chat-container" id="chat-history">
+      <!-- 初始欢迎栏 -->
+      <div class="welcome-box" id="welcome-box">
+        <div class="logo-icon-container large">
+          <svg class="jy-logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="50" cy="50" r="46" fill="url(#jy-bg-grad)" stroke="url(#jy-mint-grad)" stroke-width="2.5" />
+            <circle cx="50" cy="50" r="41" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="3 3" />
+            <path d="M 35 32 V 53 A 7 7 0 0 1 28 60 A 7 7 0 0 1 21 53" fill="none" stroke="url(#jy-slate-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M 47 32 L 56 45" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" />
+            <path d="M 65 32 L 56 45 L 70 59" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+            <circle cx="75" cy="64" r="6.5" fill="none" stroke="url(#jy-mint-grad)" stroke-width="4.5" />
+            <circle cx="75" cy="64" r="2" fill="#fff" filter="url(#jy-glow)" />
+          </svg>
+        </div>
+        <h2 style="margin: 4px 0 0 0; font-size: 15px; font-weight: 600;">欢迎使用 Jin Yang RAG</h2>
+        <p>我们已从当前网页提取出能提取的全部正文，并在本地浏览器拆分为 <strong id="chunk-count">0</strong> 个语义分块片段。</p>
+        <p style="font-size: 12px;">在下方提问，我们将利用本地相似度计算找出最相关的 Top 3 片段指引 Gemini 完成高安全度的专业级问答！</p>
+      </div>
+    </div>
+
+    <!-- 底部输入栏 -->
+    <footer>
+      <form id="chat-form" onsubmit="return false;">
+        <div class="input-row">
+          <input id="user-input" class="input-box" placeholder="输入您对本页面的疑问..." required autocomplete="off">
+          <button id="send-btn" type="submit" class="input-send-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </form>
+    </footer>
+  </div>
+
+  <!-- 引入 RAG 核心引擎 -->
+  <script src="rag-engine.js"></script>
+  <!-- 引入侧边栏交互 JavaScript -->
+  <script src="sidepanel.js"></script>
+</body>
+</html>
