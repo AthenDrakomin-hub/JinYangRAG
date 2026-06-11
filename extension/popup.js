@@ -21,7 +21,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 // 1. 设置存储默认值
 async function setupStorageDefaults() {
   if (typeof chrome !== "undefined" && chrome.storage) {
-    chrome.storage.local.get(["apiUrl", "apiKey"], (result) => {
+    chrome.storage.local.get(["apiUrl", "apiKey", "userId", "currentStage"], (result) => {
       if (result.apiUrl) {
         document.getElementById("setting-api-url").value = result.apiUrl;
       } else {
@@ -33,6 +33,16 @@ async function setupStorageDefaults() {
       }
       if (result.apiKey) {
         document.getElementById("setting-api-key").value = result.apiKey;
+      }
+      if (result.userId) {
+        document.getElementById("setting-user-id").value = result.userId;
+      } else {
+        document.getElementById("setting-user-id").value = "system_sales_default";
+      }
+      if (result.currentStage) {
+        document.getElementById("current-stage-selector").value = result.currentStage;
+      } else {
+        document.getElementById("current-stage-selector").value = "STAGE_1_RECEIVE";
       }
     });
   }
@@ -48,14 +58,26 @@ function setupUIEventHandlers() {
     settingsPanel.style.display = isVisible ? "none" : "flex";
   });
 
+  // 阶段选择器变动自动存储
+  const stageSelector = document.getElementById("current-stage-selector");
+  if (stageSelector) {
+    stageSelector.addEventListener("change", (e) => {
+      const activeStage = e.target.value;
+      if (typeof chrome !== "undefined" && chrome.storage) {
+        chrome.storage.local.set({ currentStage: activeStage });
+      }
+    });
+  }
+
   // 保存设置按钮
   const saveSettingsBtn = document.getElementById("save-settings-btn");
   saveSettingsBtn.addEventListener("click", () => {
     const apiUrlValue = document.getElementById("setting-api-url").value.trim();
     const apiKeyValue = document.getElementById("setting-api-key").value.trim();
+    const userIdValue = document.getElementById("setting-user-id").value.trim();
     
     if (typeof chrome !== "undefined" && chrome.storage) {
-      chrome.storage.local.set({ apiUrl: apiUrlValue, apiKey: apiKeyValue }, () => {
+      chrome.storage.local.set({ apiUrl: apiUrlValue, apiKey: apiKeyValue, userId: userIdValue }, () => {
         alert("配置已成功保存！");
         settingsPanel.style.display = "none";
       });
@@ -227,13 +249,17 @@ async function handleUserQuestion(query) {
   try {
     let apiUrl = "https://ais-dev-vznenzi5fkbim7vkay4366-388761582963.asia-southeast1.run.app/api/rag";
     let customApiKey = "";
+    let userId = "system_sales_default";
+    let currentStage = "STAGE_1_RECEIVE";
     
     if (typeof chrome !== "undefined" && chrome.storage) {
       const settings = await new Promise((resolve) => {
-        chrome.storage.local.get(["apiUrl", "apiKey"], (res) => resolve(res));
+        chrome.storage.local.get(["apiUrl", "apiKey", "userId", "currentStage"], (res) => resolve(res));
       });
       if (settings.apiUrl) apiUrl = settings.apiUrl;
       if (settings.apiKey) customApiKey = settings.apiKey;
+      if (settings.userId) userId = settings.userId;
+      if (settings.currentStage) currentStage = settings.currentStage;
     } else {
       apiUrl = `${window.location.origin}/api/rag`;
     }
@@ -245,7 +271,9 @@ async function handleUserQuestion(query) {
     const payload = {
       query: query,
       context: contextContent,
-      customApiKey: customApiKey || undefined
+      customApiKey: customApiKey || undefined,
+      user_id: userId,
+      current_stage: currentStage
     };
 
     const response = await fetch(apiUrl, {
@@ -281,7 +309,7 @@ function appendMessageBubble(sender, text, sources = []) {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = sender === "user" ? "您提问" : "Gemini 3.5";
+  senderLabel.textContent = sender === "user" ? "您提问" : "Agnes AI";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");
@@ -323,7 +351,7 @@ function appendLoadingBubble() {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = "Gemini 思考中...";
+  senderLabel.textContent = "Agnes AI 思考中...";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");

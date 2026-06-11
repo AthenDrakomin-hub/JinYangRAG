@@ -78,12 +78,12 @@ export default function App() {
             </div>
             <div className="flex flex-col">
               <h1 className="text-base font-bold text-zinc-900 tracking-tight leading-none flex items-center gap-1.5">
-                Jin Yang RAG
+                金阳 RAG v1.0.0
                 <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full leading-none font-semibold">
                   Chrome Extension
                 </span>
               </h1>
-              <span className="text-xs text-zinc-500 mt-1">网页知识库本地检索问答助手</span>
+              <span className="text-xs text-zinc-500 mt-1">网页知识库本地及云端检索问答助手</span>
             </div>
           </div>
 
@@ -204,14 +204,14 @@ export default function App() {
       <footer className="bg-white border-t border-zinc-200 py-6 px-6 mt-16 text-center text-xs text-zinc-400">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-1.5">
-            <span>Jin Yang RAG (网页知识库问答助手)</span>
+            <span>金阳 RAG v1.0.0</span>
             <span>•</span>
             <span className="font-semibold text-zinc-500">Google AI Studio Build</span>
           </div>
           <div className="flex items-center gap-1">
             <span>Powered by</span>
             <span className="text-emerald-500 font-semibold flex items-center gap-0.5 whitespace-nowrap">
-              Gemini 3.5 Flash <Heart className="w-3 h-3 text-red-500 fill-red-500 inline inline-block" />
+              Agnes-2.0-Flash <Heart className="w-3 h-3 text-red-500 fill-red-500 inline inline-block" />
             </span>
           </div>
         </div>

@@ -41,8 +41,7 @@
           </svg>
         </div>
         <div>
-          <h1 class="title">Jin Yang RAG</h1>
-          <span class="subtitle">网页知识库问答助手 (Popup)</span>
+          <h1 class="title">金阳 RAG v1.0.0</h1>
         </div>
       </div>
       <div class="header-actions">
@@ -55,14 +54,18 @@
       </div>
     </header>
 
-    <!-- 配置栏 -->
+     <!-- 配置栏 -->
     <div id="settings-panel" class="settings-panel">
       <div class="settings-group">
         <label class="settings-label" for="setting-api-url">开发版服务代理 API 后台端点</label>
         <input class="settings-input" id="setting-api-url" type="url" placeholder="默认使用主系统的 /api/rag">
       </div>
       <div class="settings-group">
-        <label class="settings-label" for="setting-api-key">自定义 Gemini API 密钥 (可选)</label>
+        <label class="settings-label" for="setting-user-id">租户用户识别码 (UUID 为佳，防止数据串线)</label>
+        <input class="settings-input" id="setting-user-id" type="text" placeholder="输入客户ID，如 system_sales_default">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-api-key">自定义 Agnes AI API 密钥 (可选)</label>
         <input class="settings-input" id="setting-api-key" type="password" placeholder="AI Studio 已安全挂载，此项选填">
       </div>
       <div style="text-align: right; margin-top: 4px;">
@@ -79,6 +82,20 @@
       <button id="refresh-page-btn" class="btn-icon" style="width: 22px; height: 22px;" title="重新提取并分块">
         <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
       </button>
+    </div>
+
+    <!-- 业务阶段锁定配置/选择器 -->
+    <div class="stage-control-bar" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 16px; background-color: var(--bg-secondary); border-bottom: 1px solid var(--border-color); gap: 8px;">
+      <span style="font-size: 11px; font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; gap: 4px;">
+        <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--accent-color);"></span>
+        思维引擎锁定阶段:
+      </span>
+      <select id="current-stage-selector" style="font-size: 11px; background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 2px 6px; color: var(--text-primary); cursor: pointer; max-width: 170px; font-weight: 500;">
+        <option value="STAGE_1_RECEIVE">1 阶段: 接粉接待 🤝</option>
+        <option value="STAGE_2_GROUP">2 阶段: 拉群配合 💡</option>
+        <option value="STAGE_3_ACTIVATE">3 阶段: 私聊邀约 🎯</option>
+        <option value="STAGE_4_OPEN">4 阶段: 填表开户 🚀</option>
+      </select>
     </div>
 
     <!-- 聊天区 -->

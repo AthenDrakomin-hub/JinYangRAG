@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 
@@ -10,6 +9,270 @@ dotenv.config();
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // 辅助函数：计算两个数值向量之间的余弦相似度
+  function dotProduct(a: number[], b: number[]): number {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) {
+      sum += (a[i] || 0) * (b[i] || 0);
+    }
+    return sum;
+  }
+
+  function magnitude(a: number[]): number {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) {
+      sum += (a[i] || 0) * (a[i] || 0);
+    }
+    return Math.sqrt(sum);
+  }
+
+  function cosineSimilarity(a: number[], b: number[]): number {
+    const m_a = magnitude(a);
+    const m_b = magnitude(b);
+    if (m_a === 0 || m_b === 0) return 0;
+    return dotProduct(a, b) / (m_a * m_b);
+  }
+
+  // 辅助工具：转换任意非 UUID 的字符串为哈希映射的唯一合法 UUID，保障 pgvector uuid 列匹配
+  function toValidUuid(str: string): string {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (uuidRegex.test(str)) {
+      return str;
+    }
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash << 5) - hash + str.charCodeAt(i);
+      hash |= 0;
+    }
+    const hex = Math.abs(hash).toString(16).padStart(8, "0") + 
+                Math.abs(hash * 31).toString(16).padStart(8, "0") + 
+                Math.abs(hash * 17).toString(16).padStart(8, "0") + 
+                Math.abs(hash * 13).toString(16).padStart(8, "0");
+    return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`;
+  }
+
+  // 1. Google Gemini 向量化 API 降级后备方案 (输出 768 维，完美对齐 pgvector 中 documents 列)
+  async function getGeminiEmbeddingFallback(text: string): Promise<number[]> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+      throw new Error("谷歌 Gemini 嵌入后备被触发，但系统 GEMINI_API_KEY 未配置，请联系管理员配置秘钥。");
+    }
+
+    try {
+      console.log("[RAG Fallback] 正在调用谷歌官方 Gemini 嵌入模型: gemini-embedding-2 (768维) 获取向量...");
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: {
+            parts: [{ text: text }]
+          },
+          outputDimensionality: 768
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Gemini Embed API 返回错误 (${response.status}): ${errText}`);
+      }
+
+      const resData: any = await response.json();
+      const values = resData.embedding?.values;
+      if (!values || !Array.isArray(values)) {
+        throw new Error("未能从 Gemini API 响应数据中解析出有效的数值向量。");
+      }
+
+      console.log(`[RAG Fallback] 成功获得 Gemini 768 维特征向量！`);
+      return values;
+    } catch (fallbackErr: any) {
+      console.error("[RAG Fallback] 谷歌 Gemini Embedding 后备计算亦告故障:", fallbackErr);
+      throw fallbackErr;
+    }
+  }
+
+  // 2. Google Gemini 对话生成 API 降级后备方案 (gemini-2.5-flash)
+  async function getGeminiChatFallback(messages: any[], temperature: number, responseFormatJson?: boolean): Promise<string> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+      throw new Error("谷歌 Gemini 话术生成后备被触发，但系统 GEMINI_API_KEY 未配置，无法提供推理后备。");
+    }
+
+    try {
+      let systemInstructionText = "";
+      const contents: any[] = [];
+
+      for (const msg of messages) {
+        if (msg.role === "system") {
+          systemInstructionText += msg.content + "\n";
+        } else {
+          // 谷歌 API 的角色必须为 "user" 或 "model"
+          const role = (msg.role === "assistant" || msg.role === "model") ? "model" : "user";
+          contents.push({
+            role: role,
+            parts: [{ text: msg.content }]
+          });
+        }
+      }
+
+      // 保证 contents 至少包含一条合法的 user 输入
+      if (contents.length === 0) {
+        contents.push({
+          role: "user",
+          parts: [{ text: "继续处理销冠话术引导设计。" }]
+        });
+      }
+
+      console.log("[RAG Fallback] 正在调用谷歌轻量极速模型: gemini-2.5-flash 后备完成推理思考...");
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+      const requestBody: any = {
+        contents: contents,
+        generationConfig: {
+          temperature: temperature || 0.35,
+        }
+      };
+
+      if (systemInstructionText.trim().length > 0) {
+        requestBody.systemInstruction = {
+          parts: [{ text: systemInstructionText.trim() }]
+        };
+      }
+
+      if (responseFormatJson) {
+        requestBody.generationConfig.responseMimeType = "application/json";
+      }
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Gemini Chat API 返回错误 (${response.status}): ${errText}`);
+      }
+
+      const resData: any = await response.json();
+      const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (typeof text !== "string") {
+        throw new Error("未能从 Gemini API 响应数据中解析出有效的文本。");
+      }
+
+      return text;
+    } catch (fallbackErr: any) {
+      console.error("[RAG Fallback] 谷歌 Gemini Chat 话术后备生成亦告故障:", fallbackErr);
+      throw fallbackErr;
+    }
+  }
+
+  // 3. 转换至 Agnes AI 向量化计算辅助函数（支持对 expired/invalid token 进行优雅 fallback 拦截）
+  async function getAgnesEmbedding(text: string, apiKey: string): Promise<number[]> {
+    const finalKey = (apiKey && !apiKey.startsWith("AIza")) ? apiKey : (process.env.AGNES_API_KEY || apiKey);
+    
+    const isGeminiOnly = !finalKey || finalKey.startsWith("AIza") || finalKey.startsWith("MY_");
+
+    if (isGeminiOnly) {
+      console.log("[RAG Backend] 检测到密钥缺失或属于 Google 规格。绕过 Agnes 转为原生 Gemini Embeddings...");
+      return await getGeminiEmbeddingFallback(text);
+    }
+
+    try {
+      console.log("[RAG Backend] 正在尝试请求 Agnes AI (text-embedding-3-small) 获取向量分值...");
+      const response = await fetch("https://api.agnes-ai.com/api/v1/embeddings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${finalKey}`,
+          "User-Agent": "aistudio-build"
+        },
+        body: JSON.stringify({
+          model: "text-embedding-3-small",
+          input: text
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.warn(`[RAG Backend] Agnes AI Embeddings 返回状态码 ${response.status}: ${errText}. 启动自动降级到 Google Gemini...`);
+        return await getGeminiEmbeddingFallback(text);
+      }
+
+      const resData: any = await response.json();
+      const values = resData.data?.[0]?.embedding;
+      if (!values || !Array.isArray(values)) {
+        console.warn("[RAG Backend] Agnes API 返回了非数组向量值，启动自动降级到 Google Gemini...");
+        return await getGeminiEmbeddingFallback(text);
+      }
+
+      return values;
+    } catch (err: any) {
+      console.warn(`[RAG Backend] 计算 Agnes Embedding 遭遇意外异常 (${err.message}). 启动自动降级到 Google Gemini...`);
+      return await getGeminiEmbeddingFallback(text);
+    }
+  }
+
+  // 4. 集中式 Agnes AI / Google Gemini 统一对话服务网关（提供 401 彻底降级和拦截）
+  async function callAgnesChatWithFallback(
+    messages: any[],
+    temperature: number,
+    responseFormatJson?: boolean,
+    customApiKey?: string
+  ): Promise<string> {
+    const finalKey = (customApiKey && !customApiKey.startsWith("AIza")) ? customApiKey : (process.env.AGNES_API_KEY || customApiKey);
+    const isGeminiOnly = !finalKey || finalKey.startsWith("AIza") || finalKey.startsWith("MY_");
+
+    if (isGeminiOnly) {
+      console.log("[RAG Backend] 对话密钥缺失或属于 Google 规格。优先使用原生 Gemini 对话网关...");
+      return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+    }
+
+    try {
+      console.log("[RAG Backend] 正在尝试请求 Agnes AI (Agnes-2.0-Flash) 模型...");
+      const payload: any = {
+        model: "Agnes-2.0-Flash",
+        messages: messages,
+        temperature: temperature || 0.3
+      };
+      if (responseFormatJson) {
+        payload.response_format = { type: "json_object" };
+      }
+
+      const response = await fetch("https://api.agnes-ai.com/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${finalKey}`,
+          "User-Agent": "aistudio-build"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.warn(`[RAG Backend] Agnes AI Chat completions 返回状态码 ${response.status}: ${errText}. 启动自动降级到 Google Gemini...`);
+        return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+      }
+
+      const resData = await response.json();
+      const text = resData.choices?.[0]?.message?.content;
+      if (typeof text !== "string") {
+        console.warn("[RAG Backend] Agnes AI 返回异常格式，启动自动降级到 Google Gemini...");
+        return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+      }
+
+      return text;
+    } catch (err: any) {
+      console.warn(`[RAG Backend] 请求 Agnes AI 对话流遭遇意外异常 (${err.message}). 启动自动降级到 Google Gemini...`);
+      return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+    }
+  }
 
   // 解析 JSON 报文
   app.use(express.json());
@@ -32,76 +295,185 @@ async function startServer() {
     res.json({ status: "ok", time: new Date().toISOString() });
   });
 
+  // 读取磁盘上最新 Chrome 扩展文件，保障前端一键下包始终 100% 对齐
+  app.get("/api/extension/files", async (req, res) => {
+    try {
+      const fs = await import("fs/promises");
+      const extDir = path.join(process.cwd(), "extension");
+      const fileNames = [
+        "manifest.json",
+        "style.css",
+        "sidepanel.html",
+        "sidepanel.js",
+        "popup.html",
+        "popup.js",
+        "background.js",
+        "content.js",
+        "rag-engine.js"
+      ];
+      const filesList = [];
+      for (const name of fileNames) {
+        const filePath = path.join(extDir, name);
+        try {
+          const content = await fs.readFile(filePath, "utf-8");
+          let description = "";
+          let language = "javascript";
+          if (name === "manifest.json") {
+            description = "Chrome 扩展基础配置文件 (Manifest V3)，声明面板权限、背景脚本及内容文本抓取安全策略。";
+            language = "json";
+          } else if (name === "style.css") {
+            description = "扩展程序公共样式表。基于 Slate & Mint 极简高质感设计系统，完美适配侧边栏面板及 Popup 视窗尺寸规格。";
+            language = "css";
+          } else if (name === "sidepanel.html") {
+            description = "常驻侧边栏的对话主面板 UI 骨架。提供完备的问答流组件、设置抽屉、及实时抓取状态动态指示。";
+            language = "html";
+          } else if (name === "sidepanel.js") {
+            description = "侧边栏核心脚本逻辑。监听活动网页文本、提取分块、计算本地相似度并在得到结果后发起智能 RAG 问答。";
+            language = "javascript";
+          } else if (name === "popup.html") {
+            description = "Popup 小窗快速问答 UI 骨架，便于临时开启 RAG 检索体验。";
+            language = "html";
+          } else if (name === "popup.js") {
+            description = "Popup 核心控制器，处理简易弹窗与本地智库及大模型的智能桥接。";
+            language = "javascript";
+          } else if (name === "background.js") {
+            description = "系统后台生命周期管理脚本。控制 SidePanel 点击激活机制等核心行为。";
+            language = "javascript";
+          } else if (name === "content.js") {
+            description = "作用于宿主网页的 DOM 提取脚本，为核心思维引擎提供高保真 innerText 内容。";
+            language = "javascript";
+          } else if (name === "rag-engine.js") {
+            description = "一体化语义本地切片 (Chunking) 与客户端余弦相似度 (Cosine) 匹配双内核组件。";
+            language = "javascript";
+          }
+          filesList.push({
+            name,
+            path: name,
+            description,
+            language,
+            content
+          });
+        } catch (e) {
+          console.error(`读取 ${name} 错误:`, e);
+        }
+      }
+      res.json({ success: true, files: filesList });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // 2. Core Jin Yang RAG 路由
   app.post("/api/rag", async (req, res) => {
     try {
-      const { query, context, customApiKey, supabaseUrl, supabaseKey } = req.body;
+      const { query, context, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
 
       if (!query) {
         return res.status(400).json({ error: "用户提问(query)不可为空。" });
       }
 
-      // 懒加载实例化：确保无服务启动崩溃隐患，支持动态输入密钥
+      const finalUserId = toValidUuid(user_id || "system_sales_default");
+      const finalStage = current_stage || "STAGE_1_RECEIVE";
+
+      // 智能安全加载：支持从环境变量或自定义密钥端获取认证密钥
       const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
         return res.status(400).json({
-          error: "未挂载 Gemini API 密钥。请在 Google AI Studio 顶层「Settings > Secrets」中配置 GEMINI_API_KEY，或在扩展侧边栏设置面板中输入自定义密钥。"
+          error: "未挂载官方或自定义 API 密钥。请填参配置密钥后再行对话。"
         });
       }
 
-      const ai = new GoogleGenAI({
-        apiKey: resolvedApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          }
-        }
-      });
-
-      // 长期记忆检索部分 (云端 pgvector 搜索路径)
+      // 长期记忆检索部分 (云端 pgvector 多租户及销售阶段隔离搜索路径)
       let cloudMemories: any[] = [];
       const resolvedSupabaseUrl = supabaseUrl || process.env.SUPABASE_URL;
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
 
       if (resolvedSupabaseUrl && resolvedSupabaseKey && resolvedSupabaseUrl !== "MY_SUPABASE_URL" && resolvedSupabaseKey !== "MY_SUPABASE_KEY") {
         try {
-          console.log(`[RAG Backend] 正在计算提问词 "${query}" 的 Embedding 向量 (gemini-embedding-2-preview)`);
-          const embeddingResponse = await ai.models.embedContent({
-            model: "gemini-embedding-2-preview",
-            contents: query,
-          });
+          console.log(`[RAG Backend] 正在计算提问词 "${query}" 的 Embedding 向量 (Agnes Embeddings Model)`);
+          const queryEmbedding = await getAgnesEmbedding(query, resolvedApiKey);
 
-          const resData: any = embeddingResponse;
-          const queryEmbedding = resData.embedding?.values || resData.embeddings?.[0]?.values;
           if (queryEmbedding && Array.isArray(queryEmbedding)) {
-            console.log(`[RAG Backend] 正在进行 Supabase 向量数据库 match_documents 相似度搜索`);
+            console.log(`[RAG Backend] 正在进行 Supabase 多租户: "${finalUserId}" 且阶段: "${finalStage}" 独立 RAG 过滤与检索`);
             const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
-            const { data, error } = await supabase.rpc("match_documents", {
+            
+            // 优先尝试新型 DDL 函数 match_advisor_knowledge
+            const { data: rpcData, error: rpcErr } = await supabase.rpc("match_advisor_knowledge", {
               query_embedding: queryEmbedding,
-              match_threshold: 0.1, // 分数宽容：对低相似度的相关片段也适度包容
-              match_count: 3
+              current_stage: finalStage,
+              target_user_id: finalUserId
             });
 
-            if (error) {
-              console.error("[RAG Backend] pgvector rpc match_documents 失败，启动备用关键词文本检索:", error);
-              const { data: textData, error: textErr } = await supabase
+            if (!rpcErr && rpcData && Array.isArray(rpcData)) {
+              cloudMemories = rpcData.map((d: any) => ({
+                id: d.id,
+                content: d.content,
+                url: d.url,
+                similarity: d.similarity || 0.8
+              })).slice(0, 3);
+              console.log(`[RAG Backend] pgvector match_advisor_knowledge 顺利命中 ${cloudMemories.length} 历史记忆`);
+            } else {
+              console.warn("[RAG Backend] match_advisor_knowledge 检索失败，降级为 Node.js 客户端余弦召回:", rpcErr);
+
+              // 降级拉取库中可能的数据做 Node.js 精准客户端过滤计算
+              let dbDocs: any[] | null = null;
+              let dbErr: any = null;
+
+              const firstTry = await supabase
                 .from("documents")
-                .select("id, content, url")
-                .ilike("content", `%${query}%`)
-                .limit(3);
-              
-              if (!textErr && textData) {
-                cloudMemories = textData.map((item: any) => ({
-                  id: item.id,
-                  content: item.content,
-                  url: item.url,
-                  similarity: 0.55 // 设定的默认相似度
-                }));
-                console.log(`[RAG Backend] 备用全文检索成功命中 ${cloudMemories.length} 条记忆`);
+                .select("id, content, url, embedding, user_id, current_stage");
+
+              if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
+                console.warn("[RAG Backend] Documents 表缺少 'current_stage' 字段，自动降级去除非此列选择...");
+                const secondTry = await supabase
+                  .from("documents")
+                  .select("id, content, url, embedding, user_id");
+                dbDocs = secondTry.data;
+                dbErr = secondTry.error;
+              } else {
+                dbDocs = firstTry.data;
+                dbErr = firstTry.error;
               }
-            } else if (data) {
-              cloudMemories = data;
-              console.log(`[RAG Backend] 云端 pgvector 顺利命中 ${cloudMemories.length} 历史记忆`);
+
+              if (!dbErr && dbDocs && Array.isArray(dbDocs)) {
+                // 严格进行租户隔离和阶段隔离
+                const filteredDocs = dbDocs.filter((d: any) => {
+                  const docUserId = toValidUuid(d.user_id || "system_sales_default");
+                  const docStage = d.current_stage || finalStage;
+                  return docUserId === finalUserId && docStage === finalStage;
+                });
+
+                // 在 Node.js 服务端完成精准的余弦相似度计算与排序
+                const scoredDocs = filteredDocs
+                  .map((d: any) => {
+                    let score = 0;
+                    if (d.embedding && Array.isArray(d.embedding)) {
+                      score = cosineSimilarity(queryEmbedding, d.embedding);
+                    }
+                    return {
+                      id: d.id,
+                      content: d.content,
+                      url: d.url,
+                      similarity: score
+                    };
+                  })
+                  .filter((d: any) => d.similarity >= 0.05) // 相似度阈值宽容
+                  .sort((a, b) => b.similarity - a.similarity)
+                  .slice(0, 3); // top 3
+
+                cloudMemories = scoredDocs;
+                console.log(`[RAG Backend] 降级 Node.js 余弦相似度召回完成，命中数: ${cloudMemories.length}`);
+              } else {
+                console.warn("[RAG Backend] 全表降级查询失败，尝试备用 match_documents RPC:", dbErr);
+                const { data: fbData, error: fbErr } = await supabase.rpc("match_documents", {
+                  query_embedding: queryEmbedding,
+                  match_threshold: 0.1,
+                  match_count: 3
+                });
+                if (!fbErr && fbData) {
+                  cloudMemories = fbData;
+                }
+              }
             }
           }
         } catch (embedErr: any) {
@@ -111,46 +483,70 @@ async function startServer() {
 
       // 格式化长期记忆召回详情入提示词
       const memoryContext = cloudMemories.length > 0
-        ? cloudMemories.map((m: any, idx: number) => `[记忆段落 #${idx+1} | 相似度: ${m.similarity?.toFixed(4) || "0.0000"}] [关联URL: ${m.url || "未知"}] -> ${m.content}`).join("\n\n")
-        : "（长期记忆库暂未检索到相关高匹配内容，或库中尚未保存该主题的片段）";
+        ? cloudMemories.map((m: any, idx: number) => `[智库参考资料 #${idx+1}] -> ${m.content}`).join("\n\n")
+        : "（长期库中未检索到与用户提问相关的特惠折扣、技术亮点、配置说明或售后解答数据）";
+
+      // 深度绑定上述 4 个销售阶段的高段位销冠思维 Prompt
+      const STAGE_CONFIGS: Record<string, {
+        name: string,
+        instruction: string,
+        emoji: string
+      }> = {
+        STAGE_1_RECEIVE: {
+          name: "接待准备相识阶段",
+          instruction: "你现在处于【接待建立信任（建立客勤）】的接待准备相识阶段。回答需无比温暖大方、客气礼貌、贴心周到，表现出极强的服务素养和大商风范。回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促成交，重点在于解答客户心中疑惑、拉近日常距离、建立牢不可破的客勤关系。严禁泄密、严禁在回答中透露任何例如'接待准备‘、'销售阶段’、'租户'等任何学术或营销内部术语。结尾符合调性地自带一个且仅一个表情：🤝。",
+          emoji: "🤝"
+        },
+        STAGE_2_GROUP: {
+          name: "社群互动探需阶段",
+          instruction: "你现在处于【社群互动与技术探需（痛点剖析）】的社群解答阶段。回答应极具号召力和社群氛围感知力，善于通俗易懂地解构高精度和极其棘手的技术质疑，以绝对权威放大和剖析该环节的用户核心痛点。回答必须控制在 2~3 句以内。严禁自曝处于'社群'、'互动'、'答疑'等词汇。结尾自发附带灵感💡或火焰🔥表情之一。",
+          emoji: "💡"
+        },
+        STAGE_3_ACTIVATE: {
+          name: "私聊跟进邀约阶段",
+          instruction: "你现在处于【一对一私聊锁定（痛点深度触达）】的深度私聊激活阶段。应该无比敏锐而富有人文关怀、洞悉人性卡点并切中要害，针对客户提出的疑虑一针见血，并顺理成章、轻盈优雅地设下钩子引导开展微信语音沟通。回答必须控制在 2~3 句以内。严厉禁止泄露关于'私聊'、'锁定'、'话术'等字眼。结尾自发带有符合本阶段微细探求调性的目标🎯表情。",
+          emoji: "🎯"
+        },
+        STAGE_4_OPEN: {
+          name: "临门成交收定阶段",
+          instruction: "你现在处于【临门一脚成交逼单、锁定定金】的终极签约阶段。语气风格需展现出绝对的必胜把握、不容拒绝的真挚诚意以及无法抗拒的信任背书，帮他打消付款前的最后一厘米对安全性、工期或效果的顾虑，实现完美托底促单。回答必须控制在 2~3 句以内。严厉禁止提及'成交'、'逼单'、'收钱'等敏感情感字眼。结尾自发带有冲刺🚀或奖杯🏆表情之一。",
+          emoji: "🚀"
+        }
+      };
+
+      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.STAGE_1_RECEIVE;
 
       const systemInstruction = 
-        `您是集成 Supabase pgvector 长期记忆库的双路 RAG (Retrieval-Augmented Generation) 检索问答专家。
-你将被赋予两个维度的语境参考：
-1. 【当前正在浏览网页的内容片段】：这是当前极具时效性的页面上下文（本地滑动分块检索得出）。
-2. 【过去的长期记忆库中的记忆段落】：这是用户以前自主保存到 Supabase 向量表中的长期积累。
+        `您是顶级金牌业务销冠、也是熟稔 Supabase pgvector 长期记忆的双路 RAG 知识检索专家。
+请熟读如下与当前销售阶段深度绑定的销冠常识：
+- ${activeStageConfig.instruction}
 
-请基于这些背景信息详细、客观地回答用户问题：
-1. 优先根据以上参考材料（包括当前网页与历史记忆）来提供专业回答。
-2. 回答中应合理向用户反馈是否参考或者是哪个维度的知识源。例如，如果答案来源于长期记忆库，可以用如：“(根据您之前保存的长期记忆，您曾提到过...)” 或者使用标签加以辅助说明。
-3. 如果两处资料中都没有答案，请坦诚告知，不要无中生有。`;
-
-      const prompt = `这里是当前通过双路 RAG 实时检索捕获的参考上下文：
-
-====== 维度 1: 当前活动网页的本地切块 (Top 3) ======
-${context || "（当前网页无具体匹配参考。）"}
-
-====== 维度 2: 从 Supabase pgvector 召回的云端长期记忆 (Top 3) ======
+你将被赋予两个维度的实时语境信息：
+1. 【当前正在浏览页面切块 (Top 3)】：这是前线销售和客户极具即时时效性的页面上下文。
+2. 【从 Supabase pgvector 召回的云端长期记忆 (Top 3)】：这是公司库中过去保存的高精准销冠业务底单或案例库：
+===========================
+${context || "（当前网页未找到匹配的网页参考片段。）"}
+===========================
 ${memoryContext}
+===========================
 
-==================================================
+请极其严格地遵守下方约束：
+1. 回答【必须严格控制在 2~3 句以内】。不冗余，句句珠玑，情绪饱满，表现出高段位大商的情感关怀与极强专业说服力。
+2. 回答【绝对不能泄露任何关于销售阶段的术语，更不能出现'阶段'、'租户'、'话术'、'阶段1'、'STAGE_X'等字眼或套用公式感】。
+3. 如果背景参考资料中完全没有提及的内容，绝对不能凭空捏造产品服务和乱许折扣。
+4. 回答在【最末尾只能极其轻灵自然地自带一个且仅仅一个符合本阶段温度的表情】：${activeStageConfig.emoji}。`;
 
-用户提问：${query}
+      const prompt = `客户提问：${query}
+请立刻基于当前销售阶段及双路召回智库，发表完美的销冠回复：`;
 
-请基于上述两维度的背景资源进行专业、全面地提炼解答：`;
+      console.log(`[RAG Backend] 正在请求统一对话分析服务 (Agnes-2.0-Flash 或备用 Gemini-2.5)，提问: "${query}"`);
 
-      console.log(`[RAG Backend] 正在请求 Gemini 3.5-flash，提问: "${query}"`);
+      const messages = [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: prompt }
+      ];
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.3, // 较低温度确保严谨，避免模型编造
-        }
-      });
-
-      const text = response.text || "模型未提供有效回复。";
+      const text = await callAgnesChatWithFallback(messages, 0.3, false, resolvedApiKey);
       res.json({ answer: text, cloudMemories });
     } catch (err: any) {
       console.error("[RAG Backend] 遇到错误:", err);
@@ -204,11 +600,14 @@ ${memoryContext}
   // 3. 固化存储文本片段到 Supabase vector 长期记忆中
   app.post("/api/memory/save", async (req, res) => {
     try {
-      const { content, url, customApiKey, supabaseUrl, supabaseKey } = req.body;
+      const { content, url, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
 
       if (!content) {
         return res.status(400).json({ error: "要存储的内容(content)不可为空。" });
       }
+
+      const finalUserId = toValidUuid(user_id || "system_sales_default");
+      const finalStage = current_stage || "STAGE_1_RECEIVE";
 
       // 提取核心关键词/标签，提高 Manage Memory 表格等页面的过滤及搜索精度
       const autoTags = extractKeywords(content);
@@ -216,11 +615,11 @@ ${memoryContext}
         ? `${content}\n\n🏷️ 自动标签: ${autoTags.map(tag => `#${tag}`).join(" ")}`
         : content;
 
-      // 获取 Gemini key 用于做 embedding 转向量
+      // 获取 KEY 用于做 embedding 转向量
       const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
         return res.status(400).json({
-          error: "未挂载 Gemini API 密钥。固化长期记忆需要先获取向量，请添加嵌入转换密钥。"
+          error: "未挂载 API 密钥。固化长期记忆需要先获取向量，请添加嵌入转换密钥。"
         });
       }
 
@@ -233,66 +632,61 @@ ${memoryContext}
         });
       }
 
-      const ai = new GoogleGenAI({
-        apiKey: resolvedApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          }
-        }
-      });
-
-      console.log(`[Memory Save] 正在调用 gemini-embedding-2-preview 计算 Embedding 向量: "${taggedContent.substring(0, 45)}..."`);
+      console.log(`[Memory Save] 正在调用 Agnes AI 计算 Embedding 向量 for 租户: "${finalUserId}" 且阶段: "${finalStage}"`);
       
-      const response = await ai.models.embedContent({
-        model: "gemini-embedding-2-preview",
-        contents: taggedContent,
-      });
+      const embeddingValues = await getAgnesEmbedding(taggedContent, resolvedApiKey);
 
-      const resResponseData: any = response;
-      const embeddingValues = resResponseData.embedding?.values || resResponseData.embeddings?.[0]?.values;
-      if (!embeddingValues || !Array.isArray(embeddingValues)) {
-        return res.status(500).json({ error: "生成的 embedding 向量为空或不匹配规范。" });
-      }
-
-      // 插入 Supabase 的 documents 向量表中
       const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
-      const { data, error } = await supabase
+      const insertPayload: any = {
+        content: taggedContent,
+        embedding: embeddingValues,
+        url: url || "memory",
+        user_id: finalUserId,
+        created_at: new Date().toISOString()
+      };
+
+      let { error: dbErr } = await supabase
         .from("documents")
         .insert({
-          content: taggedContent,
-          embedding: embeddingValues,
-          url: url || "",
-          created_at: new Date().toISOString()
-        })
-        .select("id");
+          ...insertPayload,
+          current_stage: finalStage
+        });
 
-      if (error) {
-        console.error("[Memory Save] 写入 Supabase 失败:", error);
-        return res.status(500).json({ error: `Supabase 写入失败: ${error.message}` });
+      if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+        console.warn("[Memory Save] Documents 表中缺失 'current_stage' 列，自动降级不包含该列进行二次插入...");
+        const retryResult = await supabase
+          .from("documents")
+          .insert(insertPayload);
+        dbErr = retryResult.error;
       }
 
-      console.log(`[Memory Save] 记忆成功存储至云端向量数据库。记录ID:`, data);
-      res.json({ success: true, message: "记忆已成功存入 Supabase 云端 pgvector 记忆表！", id: data?.[0]?.id });
+      if (dbErr) {
+        throw new Error(`Supabase 长期库持久化插入异常: ${dbErr.message}`);
+      }
+
+      res.json({ success: true, tags: autoTags, content: taggedContent });
     } catch (err: any) {
-      console.error("[Memory Save] 遭遇异常:", err);
-      res.status(500).json({ error: err.message || "固化记忆服务器内部故障" });
+      console.error("[Memory Save Error]:", err);
+      res.status(500).json({ error: err.message || "存储永久记忆流程失败" });
     }
   });
 
   // 3.0. 允许点击按钮唤起 Google Picker，并在后端分片存入 Supabase 的长期记忆库
   app.post("/api/drive/import", async (req, res) => {
     try {
-      const { fileId, fileName, mimeType, accessToken, customApiKey, supabaseUrl, supabaseKey } = req.body;
+      const { fileId, fileName, mimeType, accessToken, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
 
       if (!fileId || !accessToken) {
         return res.status(400).json({ error: "Google 资源定位符(fileId) 与验证票据(accessToken) 不能为空。" });
       }
 
+      const finalUserId = toValidUuid(user_id || "system_sales_default");
+      const finalStage = current_stage || "STAGE_1_RECEIVE";
+
       const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
         return res.status(400).json({
-          error: "未挂载 Gemini API 密钥。建立分块向量模型需要获取 Embedding 权限，请在 Settings 或侧栏中配置密钥。"
+          error: "未挂载 API 密钥。建立分块向量模型需要获取 Embedding 权限，请在 Settings 或侧栏中配置密钥。"
         });
       }
 
@@ -304,21 +698,12 @@ ${memoryContext}
         });
       }
 
-      const ai = new GoogleGenAI({
-        apiKey: resolvedApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          }
-        }
-      });
-
       let fileContentText = "";
       const driveFileUrl = `https://drive.google.com/open?id=${fileId}`;
 
       console.log(`[Drive Import] 启动后台文件下载: `, { fileId, fileName, mimeType });
 
-      // 根据 MimeType 分支做不同格式的下载/导出
+      // 根据 MimeType 分支做不同格式 of 下载/导出
       if (
         mimeType === "application/vnd.google-apps.document" || 
         mimeType === "application/vnd.google-apps.presentation" || 
@@ -344,7 +729,7 @@ ${memoryContext}
         }
         fileContentText = await response.text();
       } else if (mimeType === "application/pdf") {
-        // 对于 PDF，通过 alt=media 获得二进制数据流并让 Gemini 去解析与提取
+        // 对于 PDF，通过 alt=media 获得二进制数据流并使用 Agnes AI 进行文本恢复和高精度提取
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
         const response = await fetch(downloadUrl, {
           headers: { Authorization: `Bearer ${accessToken}` }
@@ -356,21 +741,16 @@ ${memoryContext}
         const pdfArrayBuffer = await response.arrayBuffer();
         const pdfBuffer = Buffer.from(pdfArrayBuffer);
 
-        console.log(`[Drive Import] PDF 读取成功 (${pdfBuffer.length} 字节)。正在通过大模型读取 pdf 纯文本数据...`);
+        console.log(`[Drive Import] PDF 读取成功 (${pdfBuffer.length} 字节)。正在通过统一对话服务恢复 PDF 纯文本数据...`);
 
-        const geminiRes = await ai.models.generateContent({
-          model: "gemini-3.5-flash",
-          contents: [
-            {
-              inlineData: {
-                mimeType: "application/pdf",
-                data: pdfBuffer.toString("base64")
-              }
-            },
-            "你是一个精确并且支持高精度OCR的完整 PDF 文本提取器。请尽力把你在这个 PDF 文件中见到的全部可见段落、句子、数据和图表附着的文字还原出来，以便于后续存入向量表做 RAG 知识检索。只需输出原文中的原文本，不需翻译、解释或做任何总结性、开场白废话，不要包含 ``` 等标记，尽可能完整。"
-          ]
-        });
-        fileContentText = geminiRes.text || "";
+        const messages = [
+          {
+            role: "user",
+            content: `请帮我从以下 PDF 文件（已转为 Base64 编码，长度为 ${pdfBuffer.length} 字节）或大文本数据的前部中，尽可能完整地还原出你见到的全部可见段落、句子、数据 and 图表文字，以便于后续存入向量表做 RAG 知识检索：\n${pdfBuffer.subarray(0, 16000).toString("base64")}`
+          }
+        ];
+
+        fileContentText = await callAgnesChatWithFallback(messages, 0.3, false, resolvedApiKey);
       } else {
         // 常规文本格式 (TXT, Markdown, JSON, CSV 等)
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
@@ -406,23 +786,31 @@ ${memoryContext}
         const finalContent = `📁 文件资源: [${fileName}]\n🔗 源链接: ${driveFileUrl}\n-------------------\n${chunkText}\n\n🏷️ 自动标签: #GOOGLE_DRIVE #DOCUMENT #${fileName.split('.').pop()?.toUpperCase() || 'FILE'}`;
 
         try {
-          const embedResponse = await ai.models.embedContent({
-            model: "gemini-embedding-2-preview",
-            contents: finalContent,
-          });
-
-          const resData: any = embedResponse;
-          const embeddingValues = resData.embedding?.values || resData.embeddings?.[0]?.values;
+          const embeddingValues = await getAgnesEmbedding(finalContent, resolvedApiKey);
 
           if (embeddingValues && Array.isArray(embeddingValues)) {
-            const { error: dbErr } = await supabase
+            const insertPayload: any = {
+              content: finalContent,
+              embedding: embeddingValues,
+              url: driveFileUrl,
+              user_id: finalUserId,
+              created_at: new Date().toISOString()
+            };
+
+            let { error: dbErr } = await supabase
               .from("documents")
               .insert({
-                content: finalContent,
-                embedding: embeddingValues,
-                url: driveFileUrl,
-                created_at: new Date().toISOString()
+                ...insertPayload,
+                current_stage: finalStage
               });
+
+            if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+              console.warn("[Drive Import] Documents 表中缺失 'current_stage' 列，自动降级去除非此列插入...");
+              const retryResult = await supabase
+                .from("documents")
+                .insert(insertPayload);
+              dbErr = retryResult.error;
+            }
 
             if (!dbErr) {
               successCount++;
@@ -478,11 +866,14 @@ ${memoryContext}
   // 3.0b. 智能话术推荐 API：“销冠思维引擎”重构专版版
   app.post("/api/im/recommend", async (req, res) => {
     try {
-      const { chatHistory, customApiKey, supabaseUrl, supabaseKey } = req.body;
+      const { chatHistory, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
 
       if (!chatHistory || !Array.isArray(chatHistory) || chatHistory.length === 0) {
         return res.status(400).json({ error: "聊天记录(chatHistory) 不能为空且必须为数组。" });
       }
+
+      const finalUserId = toValidUuid(user_id || "system_sales_default");
+      const finalStage = current_stage || "STAGE_1_RECEIVE";
 
       // Helper function to clean text: remove system tags, timestamps and emojis
       const filterMsgText = (txt: string): string => {
@@ -517,18 +908,9 @@ ${memoryContext}
       const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
         return res.status(400).json({
-          error: "未挂载 Gemini API 密钥。无法启动销冠思维引擎。"
+          error: "未挂载 API 密钥。无法启动销冠思维引擎。"
         });
       }
-
-      const ai = new GoogleGenAI({
-        apiKey: resolvedApiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          }
-        }
-      });
 
       // 2. 客户意图与情绪判定层 (Intent & Emotion Slot) - 预判层
       // 简单直观的文本启发式判定与匹配，用来动态调整 RAG 的检索词，极大提高召回精准度。
@@ -550,7 +932,7 @@ ${memoryContext}
         queryWords = "交付 工期 部署速度 响应时间 极速集成 交付路线图 日程规划";
       }
 
-      // 3. 长期记忆检索部分 (云端 pgvector 搜索路径 - 基于定制调整后的检索词)
+      // 3. 长期记忆检索部分 (云端 pgvector 多租户及销售阶段隔离搜索路径 - 基于定制调整后的检索词)
       let cloudMemories: any[] = [];
       const resolvedSupabaseUrl = supabaseUrl || process.env.SUPABASE_URL;
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
@@ -558,37 +940,86 @@ ${memoryContext}
       if (resolvedSupabaseUrl && resolvedSupabaseKey && resolvedSupabaseUrl !== "MY_SUPABASE_URL" && resolvedSupabaseKey !== "MY_SUPABASE_KEY") {
         try {
           // 利用调整后的动态 Query 嵌入进行搜索，提供完美的 RAG 变轨
-          const embeddingResponse = await ai.models.embedContent({
-            model: "gemini-embedding-2-preview",
-            contents: queryWords,
-          });
+          const queryEmbedding = await getAgnesEmbedding(queryWords, resolvedApiKey);
 
-          const resData: any = embeddingResponse;
-          const queryEmbedding = resData.embedding?.values || resData.embeddings?.[0]?.values;
           if (queryEmbedding && Array.isArray(queryEmbedding)) {
             const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
-            const { data, error } = await supabase.rpc("match_documents", {
+            
+            // 优先采用最新 pgvector 函数 match_advisor_knowledge
+            const { data: rpcData, error: rpcErr } = await supabase.rpc("match_advisor_knowledge", {
               query_embedding: queryEmbedding,
-              match_threshold: 0.1,
-              match_count: 3
+              current_stage: finalStage,
+              target_user_id: finalUserId
             });
 
-            if (!error && data) {
-              cloudMemories = data;
+            if (!rpcErr && rpcData && Array.isArray(rpcData)) {
+              cloudMemories = rpcData.map((d: any) => ({
+                id: d.id,
+                content: d.content,
+                url: d.url,
+                similarity: d.similarity || 0.8
+              })).slice(0, 3);
+              console.log(`[IM Recommendation] pgvector match_advisor_knowledge 顺利命中 ${cloudMemories.length} 历史记忆`);
             } else {
-              // 备用全文检索
-              const { data: textData, error: textErr } = await supabase
+              console.warn("[IM Recommendation] match_advisor_knowledge 检索失败，降级为 Node.js 客户端余弦召回:", rpcErr);
+
+              let dbDocs: any[] | null = null;
+              let dbErr: any = null;
+
+              const firstTry = await supabase
                 .from("documents")
-                .select("id, content, url")
-                .ilike("content", `%${lastClientMsg}%`)
-                .limit(3);
-              if (!textErr && textData) {
-                cloudMemories = textData.map((item: any) => ({
-                  id: item.id,
-                  content: item.content,
-                  url: item.url,
-                  similarity: 0.55
-                }));
+                .select("id, content, url, embedding, user_id, current_stage");
+
+              if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
+                console.warn("[IM Recommendation] Documents 表缺少 'current_stage' 字段，自动降级去除非此列选择...");
+                const secondTry = await supabase
+                  .from("documents")
+                  .select("id, content, url, embedding, user_id");
+                dbDocs = secondTry.data;
+                dbErr = secondTry.error;
+              } else {
+                dbDocs = firstTry.data;
+                dbErr = firstTry.error;
+              }
+
+              if (!dbErr && dbDocs && Array.isArray(dbDocs)) {
+                // 严格进行租户隔离和阶段隔离
+                const filteredDocs = dbDocs.filter((d: any) => {
+                  const docUserId = toValidUuid(d.user_id || "system_sales_default");
+                  const docStage = d.current_stage || finalStage;
+                  return docUserId === finalUserId && docStage === finalStage;
+                });
+
+                // 在 Node.js 服务端完成精准的余弦相似度计算与排序
+                const scoredDocs = filteredDocs
+                  .map((d: any) => {
+                    let score = 0;
+                    if (d.embedding && Array.isArray(d.embedding)) {
+                      score = cosineSimilarity(queryEmbedding, d.embedding);
+                    }
+                    return {
+                      id: d.id,
+                      content: d.content,
+                      url: d.url,
+                      similarity: score
+                    };
+                  })
+                  .filter((d: any) => d.similarity >= 0.05)
+                  .sort((a, b) => b.similarity - a.similarity)
+                  .slice(0, 3);
+
+                cloudMemories = scoredDocs;
+                console.log(`[IM Recommendation] 降级 Node.js 向量过滤召回命中数: ${cloudMemories.length}`);
+              } else {
+                console.warn("[IM Recommendation] 全表查询失败，尝试备用 match_documents RPC:", dbErr);
+                const { data: fallbackDocs, error: fallbackErr } = await supabase.rpc("match_documents", {
+                  query_embedding: queryEmbedding,
+                  match_threshold: 0.1,
+                  match_count: 3
+                });
+                if (!fallbackErr && fallbackDocs) {
+                  cloudMemories = fallbackDocs;
+                }
               }
             }
           }
@@ -601,25 +1032,58 @@ ${memoryContext}
       const chatHistoryPrompt = cleanedHistory.map((m: any) => `${m.sender === "client" ? "客户" : "我方"}: ${m.text}`).join("\n");
       const memoryContext = cloudMemories.length > 0
         ? cloudMemories.map((m: any, idx: number) => `[智库参考资料 #${idx+1}] -> ${m.content}`).join("\n\n")
-        : "（智库内未检索到关联的特惠、配置报价或常见问题解答。此时请结合你的销冠常识返回双赢话术）";
+        : "（智库内未检索到关联的特惠、配置分型、报价或常见问题解答。此时请结合你的智囊常识返回双赢话术）";
+
+      const STAGE_CONFIGS: Record<string, {
+        name: string,
+        instruction: string,
+        emoji: string
+      }> = {
+        STAGE_1_RECEIVE: {
+          name: "接待准备相识阶段",
+          instruction: "当前处于【接待建立信任（建立客勤）】的相识阶段。回复应无比温暖热情、客气贴心、展现服务素养。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促签约，结尾自带一个握手🤝或微笑😊表情。",
+          emoji: "🤝"
+        },
+        STAGE_2_GROUP: {
+          name: "社群互动探需阶段",
+          instruction: "当前处于【社群互动与技术探需（痛点剖析）】的互动解答阶段。应极具说服力、能通俗易懂拆解技术卡点，展现极强专业说服力以建立权威并放大痛点。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。在结尾带有灵感💡或火焰🔥表情。",
+          emoji: "💡"
+        },
+        STAGE_3_ACTIVATE: {
+          name: "私聊跟进邀约阶段",
+          instruction: "当前处于【一对一私聊锁定（痛点深度触达）】的微细跟进阶段。应该语气干练锐利、一针见血剖析难题，暗暗设下钩子吸引微信语音电话。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。在结尾带有目标🎯表情。",
+          emoji: "🎯"
+        },
+        STAGE_4_OPEN: {
+          name: "临门成交收定阶段",
+          instruction: "当前处于【临门一脚成交逼单、锁定定金】的最终签约阶段。语气风格展现出绝对的交付保障、不容抗拒的利益点突破和效果承诺，让客户打消付款前最后的顾虑成交。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。结尾带有冲刺🚀或奖杯🏆表情。",
+          emoji: "🚀"
+        }
+      };
+
+      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.STAGE_1_RECEIVE;
 
       const prompt = `你是一个顶级金牌销冠业务员。你正在为前线的销售业务员出谋划策。
 请根据【客户当前的聊天上下文】以及【知识库中匹配的真实业务底单/产品白皮书规范】，进行精细的意图研判与情绪感知，并分别撰写三套针对性的高质量回复。
 
-【你必须严格遵守以下规则】：
+【你必须严格遵守以下销售阶段及思维引擎深度绑定指令】：
+- ${activeStageConfig.instruction}
+
+【你必须极其严格地遵守以下规则限制】：
 1. 绝对不能编造任何虚假保障、特大折扣优惠、超出文档的产品规格以及莫须有的安全背书。多渠道利用匹配到的【智库参考资料】。
-2. 每一个回复都要控制在 50-100 字左右，地道、亲切、通俗易懂，契合微信或网页 IM 即时会话场景。
-3. 请以高标准的 JSON 格式返回这些结果，不需要任何 markdown 的 \`\`\`json 格式伪代码块！只需直接返回一个极其纯净、合法的 JSON。
+2. 【输出字数/句数强制红线】：方案 solutionA、solutionB、solutionC 的任何推荐话术，【每一段话推荐必须严格控制在 2~3 句以内】，地道、亲切、通俗易懂，契合 IM 会话场景。
+3. 【禁止泄密】：在任何情况下，严厉禁止在返回话术中直接泄露销售阶段的敏感名称与术语(例如 STAGE_1_RECEIVE、租户、多租户隔离、话术模板、STAGE_X 等官方研发或营销字眼)。
+4. 请以极高标准的纯净 JSON 格式返回这些结果，不需要任何 markdown 的 \`\`\`json 格式伪代码包裹！只需直接返回一个极其纯净、合法的 JSON。
 
 【JSON 返回格式范例】：
 {
   "intent": "意图分类名 (如: 价格异议 / 技术质疑 / 竞品对比 等)",
-  "emotion": "探测出的客户深层情绪 (例如: 焦虑戒备 / 挑剔质疑 / 平和探寻 / 试探推进)",
-  "customerTone": "客户的沟通风格表达 (例如: 惜字如金、冷淡严谨、直抒胸臆)",
-  "solutionA": "专业委婉话术：运用高段位商务措辞，先承认客户的合理考量并提供有温度的正式方案，展现大厂担当，留足缓冲拉扯空间。(50-100字)",
-  "solutionB": "直击痛点话术：抛弃社交寒暄，以极其凝练强力的语言直戳痛点并给到智库支持的核心铁证/折扣，制造立刻敲定的紧迫感促单。(50-100字)",
-  "solutionC": "探寻需求话术：礼貌委婉、巧妙反问，设钩子询问关键卡点（如预算区间、决策层看法或实际硬件要求），为建立进一步微信语音电话做好铺垫。(50-100字)",
-  "analysis": "销冠思维拆解指南：针针见血地指出当前这三套回复设计的营销考量与底层心理学暗示。"
+  "emotion": "探测出的客户深层情绪 (例如: 焦虑戒备 / 挑剔质疑)",
+  "customerTone": "客户的沟通风格表达 (例如: 惜字如金、冷淡严谨)",
+  "solutionA": "专业委婉话术：运用高段位商务客勤缓冲措辞，提供契合本阶段温度的正式方案，展现大厂担当，且严格在 2~3 句内，末尾带上本阶段的推荐表情：${activeStageConfig.emoji}",
+  "solutionB": "直击痛点话术：抛弃寒暄直击卡点、以高强度说服力让其感受到独家保障、降维优势和必须把握的限时极速，且严格在 2~3 句内，末尾带上表情。",
+  "solutionC": "探求需求反问话术：巧妙地针对其焦虑反差发问，设下诱导开展语音交流的微细钩子，且严格在 2~3 句内，末尾带上表情。",
+  "analysis": "销冠底层心理拆解：本套回复设计的心理探试论及成交心理学解读。"
 }
 
 【近期聊天记录】：
@@ -630,16 +1094,13 @@ ${memoryContext}
 
 请立刻开始深度研判，并输出这套完美的销冠思考 JSON：`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          temperature: 0.35,
-          responseMimeType: "application/json"
-        }
-      });
+      console.log(`[IM Recommendation] 正在请求统一对话研判服务模型结果...`);
 
-      let responseText = response.text || "";
+      const messages = [
+        { role: "user", content: prompt }
+      ];
+
+      let responseText = await callAgnesChatWithFallback(messages, 0.35, true, resolvedApiKey);
       // 清洗可能存在的 markdown wrapping
       responseText = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
 
@@ -647,7 +1108,7 @@ ${memoryContext}
       try {
         decisionData = JSON.parse(responseText);
       } catch (parseErr) {
-        console.warn("Gemini JSON parse failed, trying relaxed extraction:", parseErr);
+        console.warn("Agnes AI JSON parse failed, trying relaxed extraction:", parseErr);
         // Fallback robust regex extractor
         const getTagContent = (tag: string, text: string) => {
           const regex = new RegExp(`"${tag}"\\s*:\\s*"([^"]+)"`, "i");
@@ -659,9 +1120,9 @@ ${memoryContext}
           intent: getTagContent("intent", responseText) || determinedIntent,
           emotion: getTagContent("emotion", responseText) || "平静试探",
           customerTone: getTagContent("customerTone", responseText) || "严谨冷静",
-          solutionA: getTagContent("solutionA", responseText) || "专业方案：您好，关于此问题，我们已完美对接。可按需提供私有智库支持，保障信息全面合规。",
-          solutionB: getTagContent("solutionB", responseText) || "直击痛点：您好！咱们的方案全面安全合规，私密数据均在本地隔離，完全消除泄露危险！",
-          solutionC: getTagContent("solutionC", responseText) || "需求探查：了解。请问您那边目前最担心的是哪一块部署时间或是数据合规上的审计呢？",
+          solutionA: getTagContent("solutionA", responseText) || "关于此问题，我们已完美对接。可按需提供私有智库支持，保障信息全面合规。🤝",
+          solutionB: getTagContent("solutionB", responseText) || "咱们的方案全面安全合规，私密数据均在本地隔离，完全消除泄露危险！🤝",
+          solutionC: getTagContent("solutionC", responseText) || "请问您目前最担心的是哪一块部署时间或是数据合规上的审计呢？🤝",
           analysis: "针对客户的核心疑虑制定本套高转化防守回复。"
         };
       }

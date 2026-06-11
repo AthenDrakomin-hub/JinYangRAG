@@ -72,6 +72,8 @@ export default function SidePanelSimulator({
   const [customApiKey, setCustomApiKey] = useState<string>(() => localStorage.getItem("sp_api_key") || "");
   const [supabaseUrl, setSupabaseUrl] = useState<string>(() => localStorage.getItem("sp_supabase_url") || "");
   const [supabaseKey, setSupabaseKey] = useState<string>(() => localStorage.getItem("sp_supabase_key") || "");
+  const [currentStage, setCurrentStage] = useState<string>(() => localStorage.getItem("sp_current_stage") || "STAGE_1_RECEIVE");
+  const [userId, setUserId] = useState<string>(() => localStorage.getItem("sp_user_id") || "system_sales_default");
 
   // 固化存储状态追踪：'idle' | 'saving' | 'success' | 'error'
   const [savingStatus, setSavingStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
@@ -218,7 +220,9 @@ export default function SidePanelSimulator({
           accessToken: driveToken,
           customApiKey: customApiKey,
           supabaseUrl: supabaseUrl,
-          supabaseKey: supabaseKey
+          supabaseKey: supabaseKey,
+          user_id: userId,
+          current_stage: currentStage
         })
       });
 
@@ -318,6 +322,8 @@ export default function SidePanelSimulator({
               customApiKey: customApiKey || undefined,
               supabaseUrl: supabaseUrl || undefined,
               supabaseKey: supabaseKey || undefined,
+              user_id: userId,
+              current_stage: currentStage,
             }),
           });
 
@@ -644,6 +650,8 @@ export default function SidePanelSimulator({
             customApiKey: customApiKey || undefined,
             supabaseUrl: sUrl,
             supabaseKey: sKey,
+            user_id: userId,
+            current_stage: currentStage,
           }),
         });
         if (response.ok) {
@@ -799,6 +807,8 @@ export default function SidePanelSimulator({
           customApiKey: customApiKey || undefined,
           supabaseUrl: sUrl,
           supabaseKey: sKey,
+          user_id: userId,
+          current_stage: currentStage,
         }),
       });
 
@@ -865,7 +875,9 @@ export default function SidePanelSimulator({
         context: contextContent,
         customApiKey: customApiKey || undefined,
         supabaseUrl: supabaseUrl || undefined,
-        supabaseKey: supabaseKey || undefined
+        supabaseKey: supabaseKey || undefined,
+        user_id: userId,
+        current_stage: currentStage
       };
 
       const response = await fetch(apiUrl || "/api/rag", {
@@ -901,7 +913,7 @@ export default function SidePanelSimulator({
       const errorMsg: Message = {
         id: `err-${Date.now()}`,
         sender: "ai",
-        text: `⚠️ **请求大模型失败**:\n${err.message || "请确认本系统后端正常开机启动，或检查并填写您特定的 API 控制端点。"}\n\n*建议：可在侧边栏设置面板中输入您特定的 Gemini API Key（选填）进行验证。*`,
+        text: `⚠️ **请求大模型失败**:\n${err.message || "请确认本系统后端正常开机启动，或检查并填写您特定的 API 控制端点。"}\n\n*建议：可在侧边栏设置面板中输入您特定的 Agnes AI API Key（选填）进行验证。*`,
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       };
       const updatedErrorMessages = [...updatedUserMessages, errorMsg];
@@ -1300,9 +1312,23 @@ export default function SidePanelSimulator({
                   />
                 </div>
 
-                {/* Gemini Key */}
+                {/* Core CRM User ID (uuid) */}
                 <div className="flex flex-col gap-1">
-                  <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-400">自定义 Gemini API 密钥</span>
+                  <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-400">客群租户隔离用户 ID (user_id UUID 为佳)</span>
+                  <input
+                    type="text"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    placeholder="例如 system_sales_default"
+                    className={`border rounded-lg p-2.5 text-xs w-full focus:outline-none focus:border-emerald-500 font-mono transition-colors duration-200 ${
+                      isDark ? "bg-zinc-800 border-zinc-750 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-700"
+                    }`}
+                  />
+                </div>
+
+                {/* Agnes AI Key */}
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-400">自定义 Agnes AI API 密钥</span>
                   <input
                     id="sp-setting-api-key"
                     type="password"
@@ -1362,20 +1388,24 @@ export default function SidePanelSimulator({
 {`-- 1. 开启 pgvector 扩展
 create extension if not exists vector;
 
--- 2. 创建长期记忆表
+-- 2. 创建投顾长期记忆智库表
 create table if not exists documents (
   id uuid default gen_random_uuid() primary key,
   content text not null,
   embedding vector(768),
   url text,
+  user_id uuid default '00000000-0000-0000-0000-000000000000'::uuid,
+  current_stage text default 'STAGE_1_RECEIVE',
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
--- 3. 创建向量匹配 RPC 函数
-create or replace function match_documents (
+-- 3. 创建销冠智库阶段联合过滤检索 RPC 函数
+create or replace function match_advisor_knowledge (
   query_embedding vector(768),
-  match_threshold float,
-  match_count int
+  current_stage text,
+  target_user_id uuid,
+  match_threshold float default 0.1,
+  match_count int default 3
 )
 returns table (
   id uuid,
@@ -1395,7 +1425,10 @@ begin
     1 - (documents.embedding <=> query_embedding) as similarity,
     documents.created_at
   from documents
-  where 1 - (documents.embedding <=> query_embedding) > match_threshold
+  where 
+    (documents.user_id = target_user_id)
+    and (documents.current_stage = current_stage)
+    and (1 - (documents.embedding <=> query_embedding) > match_threshold)
   order by documents.embedding <=> query_embedding
   limit match_count;
 end;
@@ -1415,6 +1448,7 @@ $$;`}
                     localStorage.setItem("sp_api_key", customApiKey);
                     localStorage.setItem("sp_supabase_url", supabaseUrl);
                     localStorage.setItem("sp_supabase_key", supabaseKey);
+                    localStorage.setItem("sp_user_id", userId);
                     setShowSettings(false);
                   }}
                   className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold text-xs px-4 py-2 rounded-xl transition-colors cursor-pointer w-full text-center"
@@ -1543,6 +1577,31 @@ $$;`}
             <div className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-1.5 py-0.5 rounded-md leading-none whitespace-nowrap shrink-0">
               已载入 {chunks.length} 片段
             </div>
+          </div>
+
+          {/* 投顾4阶段销冠思维引擎 状态选择 bar */}
+          <div className={`px-4 py-1.5 flex items-center justify-between gap-4 shrink-0 border-b transition-colors duration-200 ${
+            isDark ? "bg-zinc-900 border-zinc-800" : "bg-zinc-50 border-zinc-200"
+          }`}>
+            <span className={`text-[11px] font-bold flex items-center gap-1 ${isDark ? "text-zinc-400" : "text-zinc-600"}`}>
+              <Layers className="w-3.5 h-3.5 text-emerald-500" />
+              当前思辨锁定阶段:
+            </span>
+            <select
+              value={currentStage}
+              onChange={(e) => {
+                setCurrentStage(e.target.value);
+                localStorage.setItem("sp_current_stage", e.target.value);
+              }}
+              className={`text-[11px] font-medium rounded p-1 border cursor-pointer focus:outline-none focus:border-emerald-500 max-w-[170px] ${
+                isDark ? "bg-zinc-850 border-zinc-700 text-zinc-200" : "bg-white border-zinc-250 text-zinc-700"
+              }`}
+            >
+              <option value="STAGE_1_RECEIVE">接待建立信任 🤝 (STAGE_1_RECEIVE)</option>
+              <option value="STAGE_2_GROUP">拉小群卡位配合 💡 (STAGE_2_GROUP)</option>
+              <option value="STAGE_3_ACTIVATE">私聊深度跟进 🎯 (STAGE_3_ACTIVATE)</option>
+              <option value="STAGE_4_OPEN">临门填表开户 🚀 (STAGE_4_OPEN)</option>
+            </select>
           </div>
 
           {/* 当检测到 IM 平台时，展示“销冠思维引擎”高级交互式研判面板 */}
@@ -1779,7 +1838,7 @@ $$;`}
             >
               {/* 日志标识 */}
               <span className="text-[10px] text-zinc-400 font-medium px-1 mb-1 block">
-                {msg.sender === "user" ? "您提问" : "Gemini AI"}{" "}
+                {msg.sender === "user" ? "您提问" : "Agnes AI"}{" "}
                 <span className="font-mono text-[9px] text-zinc-300">• {msg.timestamp}</span>
               </span>
 
@@ -2010,7 +2069,7 @@ $$;`}
           {loading && (
             <div className="flex flex-col max-w-[85%] self-start items-start animation-fadeIn">
               <span className="text-[10px] text-zinc-450 font-medium px-1 mb-1 block">
-                Gemini正在匹配检索中...
+                Agnes AI正在匹配检索中...
               </span>
               <div className={`border text-xs leading-relaxed rounded-xl rounded-tl-none p-3.5 shadow-xs ${
                 isDark ? "bg-zinc-900 border-zinc-800 text-zinc-300" : "bg-white border-zinc-200 text-zinc-650"
@@ -2328,7 +2387,7 @@ $$;`}
               </label>
             </div>
             <p className="text-[9px] text-zinc-400 leading-relaxed">
-              启用后，侧边栏会自动将您浏览过的网页生成 768 维 Gemini 向量，并在后台一键同步保存至云端，实现浏览免手工持久化。
+              启用后，侧边栏会自动将您浏览过的网页生成 1536 维 向量，并在后台一键同步保存至云端，实现浏览免手工持久化。
             </p>
           </div>
         </div>
