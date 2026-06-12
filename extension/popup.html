@@ -58,7 +58,7 @@
     <div id="settings-panel" class="settings-panel">
       <div class="settings-group">
         <label class="settings-label" for="setting-api-url">开发版服务代理 API 后台端点</label>
-        <input class="settings-input" id="setting-api-url" type="url" placeholder="默认使用主系统的 /api/rag">
+        <input class="settings-input" id="setting-api-url" type="url" placeholder="例如 https://jinyangrag-production.up.railway.app/api/rag">
       </div>
       <div class="settings-group">
         <label class="settings-label" for="setting-user-id">租户用户识别码 (UUID 为佳，防止数据串线)</label>
@@ -84,7 +84,14 @@
       </button>
     </div>
 
-    <!-- 业务阶段锁定配置/选择器 -->
+    <div class="panel-tabs" id="panel-tabs">
+      <button class="tab-btn active" data-tab="chat">智能问答</button>
+      <button class="tab-btn" data-tab="sessions">会话历史</button>
+      <button class="tab-btn" data-tab="memory">记忆库</button>
+    </div>
+    <div class="panel-content">
+      <div id="chat-panel" class="panel-section">
+        <!-- 业务阶段锁定配置/选择器 -->
     <div class="stage-control-bar" style="display: flex; align-items: center; justify-content: space-between; padding: 6px 16px; background-color: var(--bg-secondary); border-bottom: 1px solid var(--border-color); gap: 8px;">
       <span style="font-size: 11px; font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; gap: 4px;">
         <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--accent-color);"></span>
@@ -130,7 +137,29 @@
     </footer>
   </div>
 
-  <script src="rag-engine.js"></script>
+  <div id="sessions-panel" class="panel-section hidden">
+    <div class="panel-banner"><strong>会话历史</strong> / 记录本次扩展中的智能问答</div>
+    <div class="panel-description">每条历史会话均保存您的问题与 Agnes AI 的回答，可在这里快速复查。</div>
+    <div class="memory-controls">
+      <button id="clear-sessions-btn" class="btn-secondary">清空会话历史</button>
+    </div>
+    <div class="sessions-list" id="sessions-list"></div>
+    <div class="panel-empty hidden" id="sessions-empty">暂无历史会话。先提问一个问题，系统会自动保存。</div>
+  </div>
+
+  <div id="memory-panel" class="panel-section hidden">
+    <div class="panel-banner"><strong>记忆库</strong> / 本地智能记忆与云端参考</div>
+    <div class="panel-description">本模块展示已保存的记忆片段，可辅助后续问答更稳健地调用相关历史知识。</div>
+    <div class="memory-controls">
+      <button id="refresh-memory-btn" class="btn-primary">刷新记忆库</button>
+      <button id="clear-memory-btn" class="btn-secondary">清空记忆库</button>
+    </div>
+    <div class="memory-list" id="memory-list"></div>
+    <div class="panel-empty hidden" id="memory-empty">当前记忆库为空。请先提问并保存问答内容。</div>
+  </div>
+</div>
+
+<script src="rag-engine.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

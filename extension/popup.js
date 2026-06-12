@@ -7,12 +7,19 @@
 let webpageChunks = [];
 let webpageInfo = { title: "", url: "", content: "" };
 let chatHistory = [];
-let defaultApiUrl = "https://ais-dev-vznenzi5fkbim7vkay4366-388761582963.asia-southeast1.run.app/api/rag"; // 会由网页加载时动态拉取或填充
+let chatSessions = [];
+let memoryItems = [];
+const STORAGE_KEY_SESSIONS = "jinYang_chat_sessions";
+const STORAGE_KEY_MEMORIES = "jinYang_memory_items";
+let activeTab = "chat";
+let defaultApiUrl = "https://jinyangrag-production.up.railway.app/api/rag"; // 默认切换为你最新部署的 Railway 后端
 
 // 初始化 UI
 document.addEventListener("DOMContentLoaded", async () => {
   setupStorageDefaults();
   setupUIEventHandlers();
+  loadExtensionState();
+  switchTab("chat");
   
   // 核心：触发当前活动网页信息的自动提取
   await extractAndProcessActivePage();
@@ -97,6 +104,37 @@ function setupUIEventHandlers() {
     refreshPageBtn.disabled = false;
     refreshPageBtn.innerHTML = origStatus;
   });
+
+  // 标签切换
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.getAttribute("data-tab");
+      if (tab) switchTab(tab);
+    });
+  });
+
+  const refreshMemoryBtn = document.getElementById("refresh-memory-btn");
+  if (refreshMemoryBtn) {
+    refreshMemoryBtn.addEventListener("click", () => {
+      renderMemories();
+      alert("记忆库已刷新。请检查记忆列表。");
+    });
+  }
+
+  const clearSessionsBtn = document.getElementById("clear-sessions-btn");
+  if (clearSessionsBtn) {
+    clearSessionsBtn.addEventListener("click", () => {
+      clearSessions();
+    });
+  }
+
+  const clearMemoryBtn = document.getElementById("clear-memory-btn");
+  if (clearMemoryBtn) {
+    clearMemoryBtn.addEventListener("click", () => {
+      clearMemories();
+    });
+  }
 
   // 清空对话
   const clearChatBtn = document.getElementById("clear-chat-btn");
@@ -230,6 +268,166 @@ function buildLocalChunksAndTriggerUI() {
   }
 }
 
+function loadExtensionState() {
+  const storedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
+  if (storedSessions) {
+    try {
+      chatSessions = JSON.parse(storedSessions);
+    } catch (e) {
+      chatSessions = [];
+    }
+  }
+  const storedMemories = localStorage.getItem(STORAGE_KEY_MEMORIES);
+  if (storedMemories) {
+    try {
+      memoryItems = JSON.parse(storedMemories);
+    } catch (e) {
+      memoryItems = [];
+    }
+  }
+  renderSessions();
+  renderMemories();
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-tab") === tab);
+  });
+  document.querySelectorAll(".panel-section").forEach((section) => {
+    section.classList.toggle("hidden", section.id !== `${tab}-panel`);
+  });
+  if (tab === "sessions") {
+    renderSessions();
+  }
+  if (tab === "memory") {
+    renderMemories();
+  }
+}
+
+function renderSessions() {
+  const list = document.getElementById("sessions-list");
+  const empty = document.getElementById("sessions-empty");
+  if (!list || !empty) return;
+  list.innerHTML = "";
+  if (!chatSessions || chatSessions.length === 0) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  chatSessions.forEach((session) => {
+    const card = document.createElement("div");
+    card.className = "session-card";
+    card.innerHTML = `
+      <div class="session-card-header">
+        <div>
+          <div class="session-title">${session.title}</div>
+          <div class="session-meta">${new Date(session.createdAt).toLocaleString()}</div>
+        </div>
+        <button class="btn-secondary session-open-btn" data-id="${session.id}">查看</button>
+      </div>
+      <div class="session-content hidden">${formatMarkdown(session.answer ? session.answer : "(暂无回答)")}</div>
+    `;
+    list.appendChild(card);
+    const toggleBtn = card.querySelector(".session-open-btn");
+    const content = card.querySelector(".session-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "查看" : "收起";
+      });
+    }
+  });
+}
+
+function renderMemories() {
+  const list = document.getElementById("memory-list");
+  const empty = document.getElementById("memory-empty");
+  if (!list || !empty) return;
+  list.innerHTML = "";
+  if (!memoryItems || memoryItems.length === 0) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  memoryItems.forEach((memory) => {
+    const card = document.createElement("div");
+    card.className = "memory-card";
+    card.innerHTML = `
+      <div class="memory-card-header">
+        <div>
+          <div class="memory-title">${memory.title}</div>
+          <div class="memory-meta">${new Date(memory.createdAt).toLocaleString()}</div>
+        </div>
+        <button class="btn-secondary memory-toggle-btn" data-id="${memory.id}">详情</button>
+      </div>
+      <div class="memory-content hidden">${formatMarkdown(memory.snippet)}</div>
+      <div class="memory-source">来源：${memory.source || "当前网页"}</div>
+    `;
+    list.appendChild(card);
+    const toggleBtn = card.querySelector(".memory-toggle-btn");
+    const content = card.querySelector(".memory-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "详情" : "收起";
+      });
+    }
+  });
+}
+
+function saveExtensionState() {
+  localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(chatSessions));
+  localStorage.setItem(STORAGE_KEY_MEMORIES, JSON.stringify(memoryItems));
+}
+
+function clearSessions() {
+  if (!confirm("确定要清空所有会话历史吗？此操作不可恢复。")) return;
+  chatSessions = [];
+  saveExtensionState();
+  renderSessions();
+}
+
+function clearMemories() {
+  if (!confirm("确定要清空所有记忆库内容吗？此操作不可恢复。")) return;
+  memoryItems = [];
+  saveExtensionState();
+  renderMemories();
+}
+
+function persistSession(query, answer) {
+  const session = {
+    id: `sess-${Date.now()}`,
+    title: query.length > 40 ? `${query.slice(0, 40)}...` : query,
+    createdAt: new Date().toISOString(),
+    query,
+    answer
+  };
+  chatSessions.unshift(session);
+  if (chatSessions.length > 20) {
+    chatSessions = chatSessions.slice(0, 20);
+  }
+  saveExtensionState();
+  renderSessions();
+}
+
+function persistMemory(query, answer, sources) {
+  const summary = answer.length > 120 ? `${answer.slice(0, 120)}...` : answer;
+  const memory = {
+    id: `memory-${Date.now()}`,
+    title: query.length > 50 ? `${query.slice(0, 50)}...` : query,
+    snippet: summary,
+    source: sources && sources.length > 0 ? sources[0].chunk.url || "当前网页" : "当前网页",
+    createdAt: new Date().toISOString()
+  };
+  memoryItems.unshift(memory);
+  if (memoryItems.length > 30) {
+    memoryItems = memoryItems.slice(0, 30);
+  }
+  saveExtensionState();
+  renderMemories();
+}
+
 // 5. 提问响应与本地余弦检索核心流
 async function handleUserQuestion(query) {
   const chatHistoryDiv = document.getElementById("chat-history");
@@ -247,7 +445,7 @@ async function handleUserQuestion(query) {
   const loadingBubbleId = appendLoadingBubble();
   
   try {
-    let apiUrl = "https://ais-dev-vznenzi5fkbim7vkay4366-388761582963.asia-southeast1.run.app/api/rag";
+    let apiUrl = "https://jinyangrag-production.up.railway.app/api/rag";
     let customApiKey = "";
     let userId = "system_sales_default";
     let currentStage = "STAGE_1_RECEIVE";
@@ -294,6 +492,8 @@ async function handleUserQuestion(query) {
     const data = await response.json();
     const answer = data.answer || "抱歉，没有获得任何回复内容。";
     
+    persistSession(query, answer);
+    persistMemory(query, answer, matchedSources);
     appendMessageBubble("ai", answer, matchedSources);
   } catch (error) {
     removeBubble(loadingBubbleId);

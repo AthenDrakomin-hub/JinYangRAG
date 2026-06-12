@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "金阳 RAG v1.0.0",
-  "version": "1.0.0",
+  "name": "金阳 RAG v1.0.1",
+  "version": "1.0.1",
   "description": "基于 Agnes AI API 的智能网页和长期知识库问答助手，可提取当前活动标签内容，在本地与云端(Supabase pgvector)进行双路 RAG 检索问答。",
   "permissions": [
     "activeTab",

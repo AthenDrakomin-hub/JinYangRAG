@@ -7,12 +7,17 @@
 let webpageChunks = [];
 let webpageInfo = { title: "", url: "", content: "" };
 let chatHistory = [];
-let defaultApiUrl = "https://ais-dev-vznenzi5fkbim7vkay4366-388761582963.asia-southeast1.run.app/api/rag"; // 会由网页加载时动态拉取或填充
+let chatSessions = [];
+let memoryItems = [];
+const STORAGE_KEY_SESSIONS = "jinYang_chat_sessions";
+const STORAGE_KEY_MEMORIES = "jinYang_memory_items";
+let defaultApiUrl = "https://jinyangrag-production.up.railway.app/api/rag"; // 默认切换为你最新部署的 Railway 后端
 
 // 初始化 UI
 document.addEventListener("DOMContentLoaded", async () => {
   setupStorageDefaults();
   setupUIEventHandlers();
+  loadExtensionState();
   
   // 核心：触发当前活动网页信息的自动提取
   await extractAndProcessActivePage();
@@ -47,6 +52,131 @@ async function setupStorageDefaults() {
       }
     });
   }
+}
+
+function loadExtensionState() {
+  try {
+    const storedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
+    const storedMemories = localStorage.getItem(STORAGE_KEY_MEMORIES);
+    chatSessions = storedSessions ? JSON.parse(storedSessions) : [];
+    memoryItems = storedMemories ? JSON.parse(storedMemories) : [];
+    renderSessions();
+    renderMemories();
+  } catch (err) {
+    console.warn("加载扩展历史数据失败：", err);
+  }
+}
+
+function switchTab(tab) {
+  const sections = document.querySelectorAll(".panel-section");
+  sections.forEach((section) => {
+    section.classList.toggle("hidden", section.id !== `${tab}-panel`);
+  });
+}
+
+function renderSessions() {
+  const sessionsList = document.getElementById("sessions-list");
+  const sessionsEmpty = document.getElementById("sessions-empty");
+  if (!sessionsList || !sessionsEmpty) return;
+
+  sessionsList.innerHTML = "";
+  if (!chatSessions.length) {
+    sessionsEmpty.classList.remove("hidden");
+    return;
+  }
+
+  sessionsEmpty.classList.add("hidden");
+  chatSessions.slice().reverse().forEach((session) => {
+    const item = document.createElement("div");
+    item.className = "session-card";
+    item.innerHTML = `
+      <div class="session-card-header">
+        <div>
+          <div class="session-title">${session.title}</div>
+          <div class="session-meta">${new Date(session.timestamp).toLocaleString()}</div>
+        </div>
+        <button class="btn-secondary session-toggle-btn" data-id="${session.timestamp}">查看</button>
+      </div>
+      <div class="session-content hidden">${formatMarkdown(session.answer || "[暂无回答]")}</div>
+    `;
+    sessionsList.appendChild(item);
+    const toggleBtn = item.querySelector(".session-toggle-btn");
+    const content = item.querySelector(".session-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "查看" : "收起";
+      });
+    }
+  });
+}
+
+function renderMemories() {
+  const memoryList = document.getElementById("memory-list");
+  const memoryEmpty = document.getElementById("memory-empty");
+  if (!memoryList || !memoryEmpty) return;
+
+  memoryList.innerHTML = "";
+  if (!memoryItems.length) {
+    memoryEmpty.classList.remove("hidden");
+    return;
+  }
+
+  memoryEmpty.classList.add("hidden");
+  memoryItems.slice().reverse().forEach((memory) => {
+    const item = document.createElement("div");
+    item.className = "memory-card";
+    item.innerHTML = `
+      <div class="memory-card-header">
+        <div>
+          <div class="memory-title">${memory.title}</div>
+          <div class="memory-meta">${new Date(memory.timestamp).toLocaleString()} · 来源: ${memory.source || "本地"}</div>
+        </div>
+        <button class="btn-secondary memory-toggle-btn" data-id="${memory.timestamp}">详情</button>
+      </div>
+      <div class="memory-content hidden">${formatMarkdown(memory.content)}</div>
+    `;
+    memoryList.appendChild(item);
+    const toggleBtn = item.querySelector(".memory-toggle-btn");
+    const content = item.querySelector(".memory-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "详情" : "收起";
+      });
+    }
+  });
+}
+
+function saveExtensionState() {
+  localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(chatSessions));
+  localStorage.setItem(STORAGE_KEY_MEMORIES, JSON.stringify(memoryItems));
+}
+
+function persistSession(session) {
+  chatSessions.push(session);
+  saveExtensionState();
+  renderSessions();
+}
+
+function persistMemory(memory) {
+  memoryItems.push(memory);
+  saveExtensionState();
+  renderMemories();
+}
+
+function clearSessions() {
+  if (!confirm("确定要清空所有会话历史吗？此操作不可恢复。")) return;
+  chatSessions = [];
+  saveExtensionState();
+  renderSessions();
+}
+
+function clearMemories() {
+  if (!confirm("确定要清空所有记忆库内容吗？此操作不可恢复。")) return;
+  memoryItems = [];
+  saveExtensionState();
+  renderMemories();
 }
 
 // 2. 交互节点配置
@@ -98,6 +228,37 @@ function setupUIEventHandlers() {
     refreshPageBtn.disabled = false;
     refreshPageBtn.innerHTML = origStatus;
   });
+
+  // 标签页切换
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      tabButtons.forEach((btn) => btn.classList.remove("active"));
+      button.classList.add("active");
+      switchTab(button.dataset.tab);
+    });
+  });
+
+  const refreshMemoryBtn = document.getElementById("refresh-memory-btn");
+  if (refreshMemoryBtn) {
+    refreshMemoryBtn.addEventListener("click", () => {
+      loadExtensionState();
+    });
+  }
+
+  const clearSessionsBtn = document.getElementById("clear-sessions-btn");
+  if (clearSessionsBtn) {
+    clearSessionsBtn.addEventListener("click", () => {
+      clearSessions();
+    });
+  }
+
+  const clearMemoryBtn = document.getElementById("clear-memory-btn");
+  if (clearMemoryBtn) {
+    clearMemoryBtn.addEventListener("click", () => {
+      clearMemories();
+    });
+  }
 
   // 清空对话
   const clearChatBtn = document.getElementById("clear-chat-btn");
@@ -267,7 +428,7 @@ async function handleUserQuestion(query) {
   
   try {
     // 获取配置的 API 接口主机
-    let apiUrl = "https://ais-dev-vznenzi5fkbim7vkay4366-388761582963.asia-southeast1.run.app/api/rag";
+    let apiUrl = "https://jinyangrag-production.up.railway.app/api/rag";
     let customApiKey = "";
     let userId = "system_sales_default";
     let currentStage = "STAGE_1_RECEIVE";
@@ -320,6 +481,21 @@ async function handleUserQuestion(query) {
     
     // 渲染完美的 AI 泡泡
     appendMessageBubble("ai", answer, matchedSources);
+
+    persistSession({
+      title: query,
+      answer,
+      timestamp: Date.now(),
+    });
+
+    if (matchedSources && matchedSources.length) {
+      persistMemory({
+        title: query,
+        content: matchedSources.map((s) => `【${s.rank}】${truncateText(s.chunk.text, 120)}`).join("\n"),
+        source: matchedSources[0]?.chunk?.url || webpageInfo.url || "本地",
+        timestamp: Date.now(),
+      });
+    }
   } catch (error) {
     console.error("问答异常:", error);
     removeBubble(loadingBubbleId);
