@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "金阳 RAG v1.0.1",
+  "version": "1.0.1",
+  "description": "基于 Agnes AI API 的智能网页和长期知识库问答助手，可提取当前活动标签内容，在本地与云端(Supabase pgvector)进行双路 RAG 检索问答。",
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "identity"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*",
+    "https://accounts.google.com/*",
+    "https://www.googleapis.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Jin Yang RAG Panel"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
