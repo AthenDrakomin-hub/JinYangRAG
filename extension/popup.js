@@ -520,86 +520,134 @@ async function getGoogleDriveToken() {
   });
 }
 
-async function loadGooglePicker() {
-  if (window.google && window.google.picker) {
-    return;
+async function fetchGoogleDriveFiles(accessToken) {
+  const queryParts = [
+    "mimeType = 'application/vnd.google-apps.document'",
+    "mimeType = 'application/vnd.google-apps.spreadsheet'",
+    "mimeType = 'application/vnd.google-apps.presentation'",
+    "mimeType = 'application/pdf'",
+    "mimeType = 'text/plain'",
+    "mimeType = 'text/markdown'",
+    "mimeType = 'text/csv'",
+    "mimeType = 'application/octet-stream'"
+  ];
+  const q = `trashed = false and (${queryParts.join(" or ")})`;
+  const url = new URL("https://www.googleapis.com/drive/v3/files");
+  url.searchParams.set("pageSize", "30");
+  url.searchParams.set("q", q);
+  url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size)");
+  url.searchParams.set("orderBy", "modifiedTime desc");
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("includeItemsFromAllDrives", "true");
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  if (response.status === 401) {
+    googleDriveAccessToken = null;
+    throw new Error("Google Drive 访问令牌已失效，请重新连接。" );
   }
 
-  if (document.getElementById("google-gapi-script")) {
-    return new Promise((resolve, reject) => {
-      const timer = setInterval(() => {
-        if (window.gapi && window.gapi.load) {
-          clearInterval(timer);
-          window.gapi.load("picker", {
-            callback: () => resolve(undefined),
-            onerror: (err) => reject(err)
-          });
-        }
-      }, 100);
-      setTimeout(() => {
-        clearInterval(timer);
-        reject(new Error("加载 Google API 脚本超时。"));
-      }, 7000);
-    });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`获取 Drive 文件列表失败：${response.status} ${response.statusText} ${text}`);
   }
 
+  const data = await response.json();
+  return Array.isArray(data.files) ? data.files : [];
+}
+
+function showGoogleDriveFileSelector(files) {
   return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.id = "google-gapi-script";
-    script.src = "https://apis.google.com/js/api.js";
-    script.onload = () => {
-      if (!window.gapi) {
-        reject(new Error("Google API 脚本未正确加载。"));
-        return;
+    const existing = document.getElementById("google-drive-file-selector-overlay");
+    if (existing) {
+      existing.remove();
+    }
+
+    const overlay = document.createElement("div");
+    overlay.id = "google-drive-file-selector-overlay";
+    overlay.style = "position:fixed; inset:0; background: rgba(0,0,0,0.45); z-index:9999; display:flex; align-items:center; justify-content:center; padding:12px;";
+
+    const panel = document.createElement("div");
+    panel.style = "width:min(680px,100%); max-height:calc(100vh - 48px); background:#0f172a; border:1px solid #334155; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; color:#e2e8f0; box-shadow:0 20px 50px rgba(0,0,0,0.45);";
+    panel.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 18px; background:#111827; border-bottom:1px solid #334155;">
+        <div>
+          <div style="font-size:14px; font-weight:700;">选择要导入的 Google Drive 文件</div>
+          <div style="font-size:12px; color:#94a3b8; margin-top:4px;">仅列出最近 30 个非回收站文件，支持文档、表格、幻灯片、PDF、文本等格式。</div>
+        </div>
+        <button id="google-drive-file-selector-close" style="border:none; background:none; color:#f8fafc; font-size:20px; cursor:pointer;">×</button>
+      </div>
+      <div id="google-drive-file-selector-list" style="overflow:auto; flex:1; padding:10px; display:grid; gap:8px; background:#0f172a;"></div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; padding:12px 16px; background:#111827; border-top:1px solid #334155;">
+        <button id="google-drive-file-selector-cancel" style="padding:8px 14px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; cursor:pointer;">取消</button>
+      </div>
+    `;
+
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+
+    const listEl = panel.querySelector("#google-drive-file-selector-list");
+    const closeBtn = panel.querySelector("#google-drive-file-selector-close");
+    const cancelBtn = panel.querySelector("#google-drive-file-selector-cancel");
+    if (!listEl || !closeBtn || !cancelBtn) {
+      reject(new Error("Drive 文件选择器初始化失败。"));
+      return;
+    }
+
+    const cleanup = () => {
+      if (overlay.parentNode) {
+        overlay.parentNode.removeChild(overlay);
       }
-      window.gapi.load("picker", {
-        callback: () => resolve(undefined),
-        onerror: (err) => reject(new Error("Google Picker 模块加载失败：" + err))
-      });
     };
-    script.onerror = (err) => reject(new Error("Google API 脚本加载失败：" + err));
-    document.body.appendChild(script);
+
+    const createFileItem = (file, index) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.style = "text-align:left; width:100%; padding:12px 14px; border:none; border-radius:10px; background:#111827; color:#e2e8f0; cursor:pointer; display:flex; justify-content:space-between; align-items:center; box-shadow: inset 0 0 0 1px rgba(148,163,184,0.08);";
+      item.innerHTML = `
+        <div style="max-width: calc(100% - 90px);">
+          <div style="font-size:13px; font-weight:600;">${index + 1}. ${file.name}</div>
+          <div style="font-size:11px; color:#94a3b8; margin-top:4px;">${file.mimeType} · ${file.modifiedTime ? new Date(file.modifiedTime).toLocaleString() : "未知修改时间"}</div>
+        </div>
+        <span style="font-size:11px; color:#7c3aed; margin-left:12px;">选择</span>
+      `;
+      item.addEventListener("click", () => {
+        cleanup();
+        resolve(file);
+      });
+      return item;
+    };
+
+    files.forEach((file, index) => listEl.appendChild(createFileItem(file, index)));
+    if (files.length === 0) {
+      listEl.innerHTML = `<div style="padding:18px; color:#cbd5e1;">未找到可导入的文件。</div>`;
+    }
+
+    const onCancel = () => {
+      cleanup();
+      reject(new Error("已取消 Google Drive 文件选择。"));
+    };
+
+    closeBtn.addEventListener("click", onCancel);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        onCancel();
+      }
+    });
   });
 }
 
-async function createDrivePicker(accessToken, onFileSelected) {
-  const settings = await getExtensionSettings();
-  const developerKey = settings.googleApiKey;
-  const appId = settings.googleAppId;
-
-  if (!developerKey || !appId) {
-    throw new Error("请先在设置中填写 Google API Key 和 Google Project ID/App ID。" );
+async function openGoogleDriveFileBrowser(accessToken) {
+  const files = await fetchGoogleDriveFiles(accessToken);
+  if (!files.length) {
+    throw new Error("未找到可导入的 Google Drive 文件。请确认 Drive 中存在可访问的文档或 PDF。" );
   }
-
-  await loadGooglePicker();
-  const google = window.google;
-  if (!google || !google.picker) {
-    throw new Error("Google Picker 未正确初始化。请检查网络并刷新扩展。" );
-  }
-
-  const view = new google.picker.View(google.picker.ViewId.DOCS);
-  view.setMimeTypes(
-    "application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet,application/vnd.google-apps.presentation,application/pdf,text/plain,text/markdown,text/csv,application/octet-stream"
-  );
-
-  const picker = new google.picker.PickerBuilder()
-    .enableFeature(google.picker.Feature.NAV_HIDDEN)
-    .setAppId(appId)
-    .setDeveloperKey(developerKey)
-    .setOAuthToken(accessToken)
-    .addView(view)
-    .setCallback((data) => {
-      if (data.action === google.picker.Action.PICKED && Array.isArray(data.docs)) {
-        data.docs.forEach((doc) => {
-          onFileSelected({ id: doc.id, name: doc.name, mimeType: doc.mimeType });
-        });
-      } else if (data.action === google.picker.Action.CANCEL) {
-        updateDriveStatus("Google Drive 导入已取消。", false);
-      }
-    })
-    .build();
-
-  picker.setVisible(true);
+  return showGoogleDriveFileSelector(files);
 }
 
 async function handleGoogleDriveConnect() {
@@ -616,13 +664,12 @@ async function handleGoogleDriveConnect() {
 async function handleOpenDrivePicker() {
   try {
     const token = await getGoogleDriveToken();
-    await createDrivePicker(token, async (file) => {
-      updateDriveStatus(`已选择文件：${file.name}，开始导入...`, false);
-      await importDriveFile(file);
-    });
+    const file = await openGoogleDriveFileBrowser(token);
+    updateDriveStatus(`已选择文件：${file.name}，开始导入...`, false);
+    await importDriveFile(file);
   } catch (error) {
     console.error(error);
-    updateDriveStatus(`打开 Google Picker 失败：${error.message}`, true);
+    updateDriveStatus(`从 Google Drive 导入失败：${error.message}`, true);
   }
 }
 
