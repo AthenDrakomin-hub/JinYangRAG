@@ -9,8 +9,14 @@ let webpageInfo = { title: "", url: "", content: "" };
 let chatHistory = [];
 let chatSessions = [];
 let memoryItems = [];
+let cloudMemoryItems = [];
+let googleDriveAccessToken = null;
 const STORAGE_KEY_SESSIONS = "jinYang_chat_sessions";
 const STORAGE_KEY_MEMORIES = "jinYang_memory_items";
+const STORAGE_KEY_SUPABASE_URL = "jinYang_supabase_url";
+const STORAGE_KEY_SUPABASE_KEY = "jinYang_supabase_key";
+const LEGACY_STORAGE_KEY_SESSIONS = "sp_chat_sessions";
+const LEGACY_STORAGE_KEY_MEMORIES = "sp_memory_items";
 let defaultApiUrl = "https://jinyangrag-production.up.railway.app/api/rag"; // 默认切换为你最新部署的 Railway 后端
 
 // 初始化 UI
@@ -25,46 +31,364 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // 1. 设置存储默认值
 async function setupStorageDefaults() {
+  const fillSettings = (result = {}) => {
+    if (result.apiUrl) {
+      document.getElementById("setting-api-url").value = result.apiUrl;
+    } else {
+      const currentOrigin = window.location.origin;
+      const fallbackUrl = currentOrigin.includes("chrome-extension") 
+        ? defaultApiUrl 
+        : `${currentOrigin}/api/rag`;
+      document.getElementById("setting-api-url").value = fallbackUrl;
+    }
+    if (result.apiKey) {
+      document.getElementById("setting-api-key").value = result.apiKey;
+    }
+    if (result.googleClientId) {
+      document.getElementById("setting-google-client-id").value = result.googleClientId;
+    }
+    if (result.googleApiKey) {
+      document.getElementById("setting-google-api-key").value = result.googleApiKey;
+    }
+    if (result.googleAppId) {
+      document.getElementById("setting-google-app-id").value = result.googleAppId;
+    }
+    if (result.supabaseUrl) {
+      document.getElementById("setting-supabase-url").value = result.supabaseUrl;
+    }
+    if (result.supabaseKey) {
+      document.getElementById("setting-supabase-key").value = result.supabaseKey;
+    }
+    if (result.userId) {
+      document.getElementById("setting-user-id").value = result.userId;
+    } else {
+      document.getElementById("setting-user-id").value = "system_sales_default";
+    }
+    if (result.currentStage) {
+      document.getElementById("current-stage-selector").value = result.currentStage;
+    } else {
+      document.getElementById("current-stage-selector").value = "STAGE_1_RECEIVE";
+    }
+  };
+
+  const fallbackValues = {
+    apiUrl: localStorage.getItem("apiUrl"),
+    apiKey: localStorage.getItem("apiKey"),
+    googleClientId: localStorage.getItem("googleClientId"),
+    googleApiKey: localStorage.getItem("googleApiKey"),
+    googleAppId: localStorage.getItem("googleAppId"),
+    supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL),
+    supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY),
+    userId: localStorage.getItem("userId"),
+    currentStage: localStorage.getItem("currentStage")
+  };
+
   if (typeof chrome !== "undefined" && chrome.storage) {
-    chrome.storage.local.get(["apiUrl", "apiKey", "userId", "currentStage"], (result) => {
-      if (result.apiUrl) {
-        document.getElementById("setting-api-url").value = result.apiUrl;
+    chrome.storage.local.get(["apiUrl", "apiKey", "googleClientId", "googleApiKey", "googleAppId", "supabaseUrl", "supabaseKey", "userId", "currentStage"], (result) => {
+      if (result && Object.keys(result).length) {
+        fillSettings(result);
       } else {
-        // 如果没有保存过，尝试设置当前运行站点的相对路径或默认主机
-        const currentOrigin = window.location.origin;
-        const fallbackUrl = currentOrigin.includes("chrome-extension") 
-          ? defaultApiUrl 
-          : `${currentOrigin}/api/rag`;
-        document.getElementById("setting-api-url").value = fallbackUrl;
-      }
-      if (result.apiKey) {
-        document.getElementById("setting-api-key").value = result.apiKey;
-      }
-      if (result.userId) {
-        document.getElementById("setting-user-id").value = result.userId;
-      } else {
-        document.getElementById("setting-user-id").value = "system_sales_default";
-      }
-      if (result.currentStage) {
-        document.getElementById("current-stage-selector").value = result.currentStage;
-      } else {
-        document.getElementById("current-stage-selector").value = "STAGE_1_RECEIVE";
+        fillSettings(fallbackValues);
       }
     });
+  } else {
+    fillSettings(fallbackValues);
   }
 }
 
 function loadExtensionState() {
   try {
-    const storedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS);
-    const storedMemories = localStorage.getItem(STORAGE_KEY_MEMORIES);
+    const storedSessions = localStorage.getItem(STORAGE_KEY_SESSIONS) || localStorage.getItem(LEGACY_STORAGE_KEY_SESSIONS);
+    const storedMemories = localStorage.getItem(STORAGE_KEY_MEMORIES) || localStorage.getItem(LEGACY_STORAGE_KEY_MEMORIES);
     chatSessions = storedSessions ? JSON.parse(storedSessions) : [];
     memoryItems = storedMemories ? JSON.parse(storedMemories) : [];
     renderSessions();
     renderMemories();
+    fetchCloudMemories();
   } catch (err) {
     console.warn("加载扩展历史数据失败：", err);
   }
+}
+
+async function getExtensionSettings() {
+  if (typeof chrome !== "undefined" && chrome.storage) {
+    return await new Promise((resolve) => {
+      chrome.storage.local.get(["apiUrl", "apiKey", "googleClientId", "googleApiKey", "googleAppId", "supabaseUrl", "supabaseKey", "userId", "currentStage"], (result) => {
+        resolve(result || {});
+      });
+    });
+  }
+
+  return {
+    apiUrl: localStorage.getItem("apiUrl"),
+    apiKey: localStorage.getItem("apiKey"),
+    googleClientId: localStorage.getItem("googleClientId"),
+    googleApiKey: localStorage.getItem("googleApiKey"),
+    googleAppId: localStorage.getItem("googleAppId"),
+    supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL),
+    supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY),
+    userId: localStorage.getItem("userId"),
+    currentStage: localStorage.getItem("currentStage")
+  };
+}
+
+function buildBackendEndpoint(apiUrl, routeSuffix) {
+  try {
+    const url = new URL(apiUrl);
+    let pathname = url.pathname.replace(/\/api\/rag\/?$/, "");
+    pathname = pathname.replace(/\/$/, "");
+    url.pathname = `${pathname}/${routeSuffix}`;
+    return url.toString();
+  } catch (err) {
+    return `${apiUrl.replace(/\/$/, "")}/${routeSuffix}`;
+  }
+}
+
+function updateDriveStatus(text, isError = false) {
+  const statusEl = document.getElementById("drive-status");
+  if (!statusEl) return;
+  statusEl.textContent = text;
+  statusEl.style.color = isError ? "#f87171" : "#9ca3af";
+}
+
+function parseUrlFragment(fragment) {
+  const params = {};
+  const stripped = fragment.startsWith("#") ? fragment.substring(1) : fragment;
+  stripped.split("&").forEach((pair) => {
+    const [key, value] = pair.split("=");
+    if (key) {
+      params[decodeURIComponent(key)] = decodeURIComponent(value || "");
+    }
+  });
+  return params;
+}
+
+async function getGoogleDriveToken() {
+  if (googleDriveAccessToken) {
+    return googleDriveAccessToken;
+  }
+
+  const settings = await getExtensionSettings();
+  const clientId = settings.googleClientId;
+  if (!clientId) {
+    throw new Error("请先在设置中填写 Google OAuth 客户端 ID。\n可在 Google Cloud Console 创建一个 OAuth 2.0 Client ID。");
+  }
+
+  const redirectUri = chrome.identity.getRedirectURL("google-drive");
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly")}&include_granted_scopes=true&prompt=consent`;
+
+  return new Promise((resolve, reject) => {
+    chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, (redirectUrl) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!redirectUrl) {
+        reject(new Error("Google 登录返回结果为空。"));
+        return;
+      }
+      const url = new URL(redirectUrl);
+      const params = parseUrlFragment(url.hash);
+      if (!params.access_token) {
+        reject(new Error("未能获取到 Google 访问令牌，请检查 OAuth 客户端 ID 和授权设置。"));
+        return;
+      }
+      googleDriveAccessToken = params.access_token;
+      updateDriveStatus(`Google Drive 已连接 (${new Date().toLocaleTimeString()})`);
+      resolve(googleDriveAccessToken);
+    });
+  });
+}
+
+async function loadGooglePicker() {
+  if (window.google && window.google.picker) {
+    return;
+  }
+
+  if (document.getElementById("google-gapi-script")) {
+    return new Promise((resolve, reject) => {
+      const timer = setInterval(() => {
+        if (window.gapi && window.gapi.load) {
+          clearInterval(timer);
+          window.gapi.load("picker", {
+            callback: () => resolve(undefined),
+            onerror: (err) => reject(err)
+          });
+        }
+      }, 100);
+      setTimeout(() => {
+        clearInterval(timer);
+        reject(new Error("加载 Google API 脚本超时。"));
+      }, 7000);
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.id = "google-gapi-script";
+    script.src = "https://apis.google.com/js/api.js";
+    script.onload = () => {
+      if (!window.gapi) {
+        reject(new Error("Google API 脚本未正确加载。"));
+        return;
+      }
+      window.gapi.load("picker", {
+        callback: () => resolve(undefined),
+        onerror: (err) => reject(new Error("Google Picker 模块加载失败：" + err))
+      });
+    };
+    script.onerror = (err) => reject(new Error("Google API 脚本加载失败：" + err));
+    document.body.appendChild(script);
+  });
+}
+
+async function createDrivePicker(accessToken, onFileSelected) {
+  const settings = await getExtensionSettings();
+  const developerKey = settings.googleApiKey;
+  const appId = settings.googleAppId;
+
+  if (!developerKey || !appId) {
+    throw new Error("请先在设置中填写 Google API Key 和 Google Project ID/App ID。");
+  }
+
+  await loadGooglePicker();
+  const google = window.google;
+  if (!google || !google.picker) {
+    throw new Error("Google Picker 未正确初始化。请检查网络并刷新扩展。");
+  }
+
+  const view = new google.picker.View(google.picker.ViewId.DOCS);
+  view.setMimeTypes(
+    "application/vnd.google-apps.document,application/vnd.google-apps.spreadsheet,application/vnd.google-apps.presentation,application/pdf,text/plain,text/markdown,text/csv,application/octet-stream"
+  );
+
+  const picker = new google.picker.PickerBuilder()
+    .enableFeature(google.picker.Feature.NAV_HIDDEN)
+    .setAppId(appId)
+    .setDeveloperKey(developerKey)
+    .setOAuthToken(accessToken)
+    .addView(view)
+    .setCallback((data) => {
+      if (data.action === google.picker.Action.PICKED && Array.isArray(data.docs)) {
+        data.docs.forEach((doc) => {
+          onFileSelected({ id: doc.id, name: doc.name, mimeType: doc.mimeType });
+        });
+      } else if (data.action === google.picker.Action.CANCEL) {
+        updateDriveStatus("Google Drive 导入已取消。", false);
+      }
+    })
+    .build();
+
+  picker.setVisible(true);
+}
+
+async function handleGoogleDriveConnect() {
+  try {
+    updateDriveStatus("正在连接 Google Drive...", false);
+    await getGoogleDriveToken();
+    updateDriveStatus("Google Drive 已连接。可继续点击“从 Drive 导入”。", false);
+  } catch (error) {
+    console.error(error);
+    updateDriveStatus(`Google Drive 连接失败：${error.message}`, true);
+  }
+}
+
+async function handleOpenDrivePicker() {
+  try {
+    const token = await getGoogleDriveToken();
+    await createDrivePicker(token, async (file) => {
+      updateDriveStatus(`已选择文件：${file.name}，开始导入...`, false);
+      await importDriveFile(file);
+    });
+  } catch (error) {
+    console.error(error);
+    updateDriveStatus(`打开 Google Picker 失败：${error.message}`, true);
+  }
+}
+
+async function importDriveFile(file) {
+  const settings = await getExtensionSettings();
+  const apiUrl = settings.apiUrl || defaultApiUrl;
+  const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
+  const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
+  const userId = settings.userId || "system_sales_default";
+  const currentStage = settings.currentStage || "STAGE_1_RECEIVE";
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error("请先配置 Supabase URL 和 Supabase Key，才能完成 Google Drive 文档导入。");
+  }
+  if (!googleDriveAccessToken) {
+    throw new Error("当前尚未获取 Google Drive 访问权限，请先点击连接 Google Drive。");
+  }
+
+  const importEndpoint = buildBackendEndpoint(apiUrl, "api/drive/import");
+  const response = await fetch(importEndpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileId: file.id,
+      fileName: file.name,
+      mimeType: file.mimeType,
+      accessToken: googleDriveAccessToken,
+      supabaseUrl,
+      supabaseKey,
+      user_id: userId,
+      current_stage: currentStage
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || `导入失败，HTTP ${response.status}`);
+  }
+  updateDriveStatus(`导入成功：${file.name}，共 ${data.importedChunks || 0}/${data.totalChunks || 0} 个片段。`, false);
+  await fetchCloudMemories();
+}
+
+async function fetchCloudMemories() {
+  const settings = await getExtensionSettings();
+  const apiUrl = settings.apiUrl || defaultApiUrl;
+  const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
+  const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
+
+  if (!supabaseUrl || !supabaseKey) {
+    cloudMemoryItems = [];
+    renderMemories();
+    return;
+  }
+
+  const memoryEndpoint = buildBackendEndpoint(apiUrl, "api/memory/list");
+  try {
+    const response = await fetch(memoryEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ supabaseUrl, supabaseKey })
+    });
+
+    if (!response.ok) {
+      cloudMemoryItems = [];
+      renderMemories();
+      return;
+    }
+
+    const data = await response.json();
+    if (data.success && Array.isArray(data.list)) {
+      cloudMemoryItems = data.list.map((item) => ({
+        id: item.id ? String(item.id) : `cloud-${Date.now()}-${Math.random()}`,
+        title: item.url || `Supabase 记忆 ${new Date(item.created_at || item.createdAt || Date.now()).toLocaleString()}`,
+        snippet: item.content ? String(item.content).slice(0, 140) : "(无内容摘要)",
+        source: "Supabase",
+        createdAt: item.created_at || item.createdAt || new Date().toISOString()
+      }));
+    } else {
+      cloudMemoryItems = [];
+    }
+  } catch (error) {
+    console.warn("获取 Supabase 记忆失败：", error);
+    cloudMemoryItems = [];
+  }
+
+  renderMemories();
 }
 
 function switchTab(tab) {
@@ -72,6 +396,10 @@ function switchTab(tab) {
   sections.forEach((section) => {
     section.classList.toggle("hidden", section.id !== `${tab}-panel`);
   });
+  if (tab === "memory") {
+    renderMemories();
+    fetchCloudMemories();
+  }
 }
 
 function renderSessions() {
@@ -117,22 +445,32 @@ function renderMemories() {
   if (!memoryList || !memoryEmpty) return;
 
   memoryList.innerHTML = "";
-  if (!memoryItems.length) {
+
+  const mergedMemories = [];
+  const seen = new Set();
+  [...cloudMemoryItems.slice().reverse(), ...memoryItems.slice().reverse()].forEach((memory) => {
+    if (!memory || !memory.id) return;
+    if (seen.has(memory.id)) return;
+    seen.add(memory.id);
+    mergedMemories.push(memory);
+  });
+
+  if (mergedMemories.length === 0) {
     memoryEmpty.classList.remove("hidden");
     return;
   }
 
   memoryEmpty.classList.add("hidden");
-  memoryItems.slice().reverse().forEach((memory) => {
+  mergedMemories.forEach((memory) => {
     const item = document.createElement("div");
     item.className = "memory-card";
     item.innerHTML = `
       <div class="memory-card-header">
         <div>
           <div class="memory-title">${memory.title}</div>
-          <div class="memory-meta">${new Date(memory.timestamp).toLocaleString()} · 来源: ${memory.source || "本地"}</div>
+          <div class="memory-meta">${new Date(memory.timestamp || memory.createdAt).toLocaleString()} · 来源: ${memory.source || "本地"}</div>
         </div>
-        <button class="btn-secondary memory-toggle-btn" data-id="${memory.timestamp}">详情</button>
+        <button class="btn-secondary memory-toggle-btn" data-id="${memory.timestamp || memory.id}">详情</button>
       </div>
       <div class="memory-content hidden">${formatMarkdown(memory.content)}</div>
     `;
@@ -149,8 +487,12 @@ function renderMemories() {
 }
 
 function saveExtensionState() {
-  localStorage.setItem(STORAGE_KEY_SESSIONS, JSON.stringify(chatSessions));
-  localStorage.setItem(STORAGE_KEY_MEMORIES, JSON.stringify(memoryItems));
+  const sessionData = JSON.stringify(chatSessions);
+  const memoryData = JSON.stringify(memoryItems);
+  localStorage.setItem(STORAGE_KEY_SESSIONS, sessionData);
+  localStorage.setItem(LEGACY_STORAGE_KEY_SESSIONS, sessionData);
+  localStorage.setItem(STORAGE_KEY_MEMORIES, memoryData);
+  localStorage.setItem(LEGACY_STORAGE_KEY_MEMORIES, memoryData);
 }
 
 function persistSession(session) {
@@ -205,14 +547,28 @@ function setupUIEventHandlers() {
   saveSettingsBtn.addEventListener("click", () => {
     const apiUrlValue = document.getElementById("setting-api-url").value.trim();
     const apiKeyValue = document.getElementById("setting-api-key").value.trim();
+    const supabaseUrlValue = document.getElementById("setting-supabase-url").value.trim();
+    const supabaseKeyValue = document.getElementById("setting-supabase-key").value.trim();
     const userIdValue = document.getElementById("setting-user-id").value.trim();
     
+    const googleClientIdValue = document.getElementById("setting-google-client-id").value.trim();
+    const googleApiKeyValue = document.getElementById("setting-google-api-key").value.trim();
+    const googleAppIdValue = document.getElementById("setting-google-app-id").value.trim();
+
     if (typeof chrome !== "undefined" && chrome.storage) {
-      chrome.storage.local.set({ apiUrl: apiUrlValue, apiKey: apiKeyValue, userId: userIdValue }, () => {
+      chrome.storage.local.set({ apiUrl: apiUrlValue, apiKey: apiKeyValue, googleClientId: googleClientIdValue, googleApiKey: googleApiKeyValue, googleAppId: googleAppIdValue, supabaseUrl: supabaseUrlValue, supabaseKey: supabaseKeyValue, userId: userIdValue }, () => {
         alert("配置已成功保存！");
         settingsPanel.style.display = "none";
       });
     } else {
+      localStorage.setItem("apiUrl", apiUrlValue);
+      localStorage.setItem("apiKey", apiKeyValue);
+      localStorage.setItem("googleClientId", googleClientIdValue);
+      localStorage.setItem("googleApiKey", googleApiKeyValue);
+      localStorage.setItem("googleAppId", googleAppIdValue);
+      localStorage.setItem(STORAGE_KEY_SUPABASE_URL, supabaseUrlValue);
+      localStorage.setItem(STORAGE_KEY_SUPABASE_KEY, supabaseKeyValue);
+      localStorage.setItem("userId", userIdValue);
       alert("本地浏览器存储不可用，配置已暂存内存中");
       settingsPanel.style.display = "none";
     }
@@ -241,8 +597,35 @@ function setupUIEventHandlers() {
 
   const refreshMemoryBtn = document.getElementById("refresh-memory-btn");
   if (refreshMemoryBtn) {
-    refreshMemoryBtn.addEventListener("click", () => {
-      loadExtensionState();
+    refreshMemoryBtn.addEventListener("click", async () => {
+      refreshMemoryBtn.disabled = true;
+      refreshMemoryBtn.textContent = "刷新中...";
+      await fetchCloudMemories();
+      refreshMemoryBtn.disabled = false;
+      refreshMemoryBtn.textContent = "刷新记忆库";
+      alert("记忆库已刷新。请检查记忆列表。");
+    });
+  }
+
+  const connectDriveBtn = document.getElementById("connect-drive-btn");
+  if (connectDriveBtn) {
+    connectDriveBtn.addEventListener("click", async () => {
+      connectDriveBtn.disabled = true;
+      connectDriveBtn.textContent = "连接中...";
+      await handleGoogleDriveConnect();
+      connectDriveBtn.disabled = false;
+      connectDriveBtn.textContent = "连接 Google Drive";
+    });
+  }
+
+  const openDrivePickerBtn = document.getElementById("open-drive-picker-btn");
+  if (openDrivePickerBtn) {
+    openDrivePickerBtn.addEventListener("click", async () => {
+      openDrivePickerBtn.disabled = true;
+      openDrivePickerBtn.textContent = "打开中...";
+      await handleOpenDrivePicker();
+      openDrivePickerBtn.disabled = false;
+      openDrivePickerBtn.textContent = "从 Drive 导入";
     });
   }
 

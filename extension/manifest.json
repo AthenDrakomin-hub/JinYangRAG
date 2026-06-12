@@ -7,12 +7,19 @@
     "activeTab",
     "sidePanel",
     "scripting",
-    "storage"
+    "storage",
+    "identity"
   ],
   "host_permissions": [
     "https://*/*",
-    "http://*/*"
+    "http://*/*",
+    "https://accounts.google.com/*",
+    "https://apis.google.com/*",
+    "https://www.googleapis.com/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' https://apis.google.com; object-src 'self'"
+  },
   "background": {
     "service_worker": "background.js"
   },

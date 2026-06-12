@@ -68,6 +68,26 @@
         <label class="settings-label" for="setting-api-key">自定义 Agnes AI API 密钥 (可选)</label>
         <input class="settings-input" id="setting-api-key" type="password" placeholder="AI Studio 已安全挂载，此项选填">
       </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-google-client-id">Google OAuth 客户端 ID</label>
+        <input class="settings-input" id="setting-google-client-id" type="text" placeholder="例如 1234-abc.apps.googleusercontent.com">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-google-api-key">Google API Key (Picker)</label>
+        <input class="settings-input" id="setting-google-api-key" type="text" placeholder="Google API Key">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-google-app-id">Google Project ID / App ID</label>
+        <input class="settings-input" id="setting-google-app-id" type="text" placeholder="Google Cloud Project ID">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-supabase-url">Supabase 项目 URL (云端记忆)</label>
+        <input class="settings-input" id="setting-supabase-url" type="url" placeholder="例如 https://your-project.supabase.co">
+      </div>
+      <div class="settings-group">
+        <label class="settings-label" for="setting-supabase-key">Supabase Anon Key 或 Service Role Key</label>
+        <input class="settings-input" id="setting-supabase-key" type="password" placeholder="Supabase Anon Key 或 Service Role Key">
+      </div>
       <div style="text-align: right; margin-top: 4px;">
         <button id="save-settings-btn" class="btn-primary" style="padding: 4px 10px; font-size: 11px;">保存配置</button>
       </div>
@@ -98,11 +118,12 @@
         思维引擎锁定阶段:
       </span>
       <select id="current-stage-selector" style="font-size: 11px; background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 2px 6px; color: var(--text-primary); cursor: pointer; max-width: 170px; font-weight: 500;">
-        <option value="STAGE_1_RECEIVE">1 阶段: 接粉接待 🤝</option>
-        <option value="STAGE_2_GROUP">2 阶段: 拉群配合 💡</option>
-        <option value="STAGE_3_ACTIVATE">3 阶段: 私聊邀约 🎯</option>
-        <option value="STAGE_4_OPEN">4 阶段: 填表开户 🚀</option>
+        <option value="STAGE_1_RECEIVE">1 阶段: 接待准备 🤝</option>
+        <option value="STAGE_2_GROUP">2 阶段: 社群探需 💡</option>
+        <option value="STAGE_3_ACTIVATE">3 阶段: 私聊激活 🎯</option>
+        <option value="STAGE_4_OPEN">4 阶段: 临门收单 🚀</option>
       </select>
+      <div style="font-size: 10px; color: var(--text-secondary); margin-top: 4px; line-height: 1.3; max-width: 280px;">请选择当前客户跟进阶段；系统会基于该阶段调整回答风格与话术节奏。保留四个阶段以匹配后端策略层级。</div>
     </div>
 
     <!-- 聊天区 -->
@@ -149,11 +170,14 @@
 
   <div id="memory-panel" class="panel-section hidden">
     <div class="panel-banner"><strong>记忆库</strong> / 本地智能记忆与云端参考</div>
-    <div class="panel-description">本模块展示已保存的记忆片段，可辅助后续问答更稳健地调用相关历史知识。</div>
+    <div class="panel-description">本模块展示已保存的记忆片段，可辅助后续问答更稳健地调用相关历史知识。支持从 Supabase 云端同步读取。</div>
     <div class="memory-controls">
       <button id="refresh-memory-btn" class="btn-primary">刷新记忆库</button>
+      <button id="connect-drive-btn" class="btn-secondary">连接 Google Drive</button>
+      <button id="open-drive-picker-btn" class="btn-primary">从 Drive 导入</button>
       <button id="clear-memory-btn" class="btn-secondary">清空记忆库</button>
     </div>
+    <div id="drive-status" class="panel-description" style="font-size:11px; color:#9ca3af; margin-top:4px;">Google Drive 未连接。</div>
     <div class="memory-list" id="memory-list"></div>
     <div class="panel-empty hidden" id="memory-empty">当前记忆库为空。请先提问并保存问答内容。</div>
   </div>
