@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+layout-*.js
+page-*.js
+polyfills-*.js
+main-app-*.js
+webpack-*.js
+*-*.js
+html_response__*
+rsc_response__*

@@ -8,7 +8,11 @@ dotenv.config();
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
+
+  const AGNES_API_BASE_URL = (process.env.AGNES_API_BASE_URL || "https://apihub.agnes-ai.com/v1").replace(/\/?$/, "");
+  const AGNES_EMBEDDING_MODEL = process.env.AGNES_EMBEDDING_MODEL || "agnes-2.0-flash";
+  const AGNES_CHAT_MODEL = process.env.AGNES_CHAT_MODEL || "agnes-2.0-flash";
 
   // 辅助函数：计算两个数值向量之间的余弦相似度
   function dotProduct(a: number[], b: number[]): number {
@@ -52,140 +56,16 @@ async function startServer() {
     return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`;
   }
 
-  // 1. Google Gemini 向量化 API 降级后备方案 (输出 768 维，完美对齐 pgvector 中 documents 列)
-  async function getGeminiEmbeddingFallback(text: string): Promise<number[]> {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-      throw new Error("谷歌 Gemini 嵌入后备被触发，但系统 GEMINI_API_KEY 未配置，请联系管理员配置秘钥。");
-    }
-
-    try {
-      console.log("[RAG Fallback] 正在调用谷歌官方 Gemini 嵌入模型: gemini-embedding-2 (768维) 获取向量...");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=${apiKey}`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          content: {
-            parts: [{ text: text }]
-          },
-          outputDimensionality: 768
-        })
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Gemini Embed API 返回错误 (${response.status}): ${errText}`);
-      }
-
-      const resData: any = await response.json();
-      const values = resData.embedding?.values;
-      if (!values || !Array.isArray(values)) {
-        throw new Error("未能从 Gemini API 响应数据中解析出有效的数值向量。");
-      }
-
-      console.log(`[RAG Fallback] 成功获得 Gemini 768 维特征向量！`);
-      return values;
-    } catch (fallbackErr: any) {
-      console.error("[RAG Fallback] 谷歌 Gemini Embedding 后备计算亦告故障:", fallbackErr);
-      throw fallbackErr;
-    }
-  }
-
-  // 2. Google Gemini 对话生成 API 降级后备方案 (gemini-2.5-flash)
-  async function getGeminiChatFallback(messages: any[], temperature: number, responseFormatJson?: boolean): Promise<string> {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-      throw new Error("谷歌 Gemini 话术生成后备被触发，但系统 GEMINI_API_KEY 未配置，无法提供推理后备。");
-    }
-
-    try {
-      let systemInstructionText = "";
-      const contents: any[] = [];
-
-      for (const msg of messages) {
-        if (msg.role === "system") {
-          systemInstructionText += msg.content + "\n";
-        } else {
-          // 谷歌 API 的角色必须为 "user" 或 "model"
-          const role = (msg.role === "assistant" || msg.role === "model") ? "model" : "user";
-          contents.push({
-            role: role,
-            parts: [{ text: msg.content }]
-          });
-        }
-      }
-
-      // 保证 contents 至少包含一条合法的 user 输入
-      if (contents.length === 0) {
-        contents.push({
-          role: "user",
-          parts: [{ text: "继续处理销冠话术引导设计。" }]
-        });
-      }
-
-      console.log("[RAG Fallback] 正在调用谷歌轻量极速模型: gemini-2.5-flash 后备完成推理思考...");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-      const requestBody: any = {
-        contents: contents,
-        generationConfig: {
-          temperature: temperature || 0.35,
-        }
-      };
-
-      if (systemInstructionText.trim().length > 0) {
-        requestBody.systemInstruction = {
-          parts: [{ text: systemInstructionText.trim() }]
-        };
-      }
-
-      if (responseFormatJson) {
-        requestBody.generationConfig.responseMimeType = "application/json";
-      }
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Gemini Chat API 返回错误 (${response.status}): ${errText}`);
-      }
-
-      const resData: any = await response.json();
-      const text = resData.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (typeof text !== "string") {
-        throw new Error("未能从 Gemini API 响应数据中解析出有效的文本。");
-      }
-
-      return text;
-    } catch (fallbackErr: any) {
-      console.error("[RAG Fallback] 谷歌 Gemini Chat 话术后备生成亦告故障:", fallbackErr);
-      throw fallbackErr;
-    }
-  }
-
-  // 3. 转换至 Agnes AI 向量化计算辅助函数（支持对 expired/invalid token 进行优雅 fallback 拦截）
+  // 1. Agnes AI 向量化计算辅助函数
   async function getAgnesEmbedding(text: string, apiKey: string): Promise<number[]> {
-    const finalKey = (apiKey && !apiKey.startsWith("AIza")) ? apiKey : (process.env.AGNES_API_KEY || apiKey);
-    
-    const isGeminiOnly = !finalKey || finalKey.startsWith("AIza") || finalKey.startsWith("MY_");
-
-    if (isGeminiOnly) {
-      console.log("[RAG Backend] 检测到密钥缺失或属于 Google 规格。绕过 Agnes 转为原生 Gemini Embeddings...");
-      return await getGeminiEmbeddingFallback(text);
+    const finalKey = apiKey || process.env.AGNES_API_KEY;
+    if (!finalKey || finalKey.startsWith("MY_")) {
+      throw new Error("Agnes AI API key 未配置或无效，请设置 AGNES_API_KEY 或传入 customApiKey。");
     }
 
     try {
-      console.log("[RAG Backend] 正在尝试请求 Agnes AI (text-embedding-3-small) 获取向量分值...");
-      const response = await fetch("https://api.agnes-ai.com/api/v1/embeddings", {
+      console.log(`[RAG Backend] 正在请求 Agnes AI Embeddings (${AGNES_EMBEDDING_MODEL})...`);
+      const response = await fetch(`${AGNES_API_BASE_URL}/embeddings`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -193,50 +73,45 @@ async function startServer() {
           "User-Agent": "aistudio-build"
         },
         body: JSON.stringify({
-          model: "text-embedding-3-small",
+          model: AGNES_EMBEDDING_MODEL,
           input: text
         })
       });
 
       if (!response.ok) {
         const errText = await response.text();
-        console.warn(`[RAG Backend] Agnes AI Embeddings 返回状态码 ${response.status}: ${errText}. 启动自动降级到 Google Gemini...`);
-        return await getGeminiEmbeddingFallback(text);
+        throw new Error(`[RAG Backend] Agnes AI Embeddings 请求失败 (${response.status}): ${errText}`);
       }
 
       const resData: any = await response.json();
       const values = resData.data?.[0]?.embedding;
       if (!values || !Array.isArray(values)) {
-        console.warn("[RAG Backend] Agnes API 返回了非数组向量值，启动自动降级到 Google Gemini...");
-        return await getGeminiEmbeddingFallback(text);
+        throw new Error("未从 Agnes API 响应解析到有效向量。");
       }
 
       return values;
     } catch (err: any) {
-      console.warn(`[RAG Backend] 计算 Agnes Embedding 遭遇意外异常 (${err.message}). 启动自动降级到 Google Gemini...`);
-      return await getGeminiEmbeddingFallback(text);
+      console.error("[RAG Backend] Agnes Embedding 请求失败:", err);
+      throw err;
     }
   }
 
-  // 4. 集中式 Agnes AI / Google Gemini 统一对话服务网关（提供 401 彻底降级和拦截）
-  async function callAgnesChatWithFallback(
+  // 2. Agnes AI 对话服务网关
+  async function callAgnesChat(
     messages: any[],
     temperature: number,
     responseFormatJson?: boolean,
     customApiKey?: string
   ): Promise<string> {
-    const finalKey = (customApiKey && !customApiKey.startsWith("AIza")) ? customApiKey : (process.env.AGNES_API_KEY || customApiKey);
-    const isGeminiOnly = !finalKey || finalKey.startsWith("AIza") || finalKey.startsWith("MY_");
-
-    if (isGeminiOnly) {
-      console.log("[RAG Backend] 对话密钥缺失或属于 Google 规格。优先使用原生 Gemini 对话网关...");
-      return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+    const finalKey = customApiKey || process.env.AGNES_API_KEY;
+    if (!finalKey || finalKey.startsWith("MY_")) {
+      throw new Error("Agnes AI API key 未配置或无效，请设置 AGNES_API_KEY 或传入 customApiKey。");
     }
 
     try {
-      console.log("[RAG Backend] 正在尝试请求 Agnes AI (Agnes-2.0-Flash) 模型...");
+      console.log(`[RAG Backend] 正在请求 Agnes AI 对话模型: ${AGNES_CHAT_MODEL}...`);
       const payload: any = {
-        model: "Agnes-2.0-Flash",
+        model: AGNES_CHAT_MODEL,
         messages: messages,
         temperature: temperature || 0.3
       };
@@ -244,7 +119,7 @@ async function startServer() {
         payload.response_format = { type: "json_object" };
       }
 
-      const response = await fetch("https://api.agnes-ai.com/api/v1/chat/completions", {
+      const response = await fetch(`${AGNES_API_BASE_URL}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -256,21 +131,19 @@ async function startServer() {
 
       if (!response.ok) {
         const errText = await response.text();
-        console.warn(`[RAG Backend] Agnes AI Chat completions 返回状态码 ${response.status}: ${errText}. 启动自动降级到 Google Gemini...`);
-        return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+        throw new Error(`[RAG Backend] Agnes AI Chat 请求失败 (${response.status}): ${errText}`);
       }
 
-      const resData = await response.json();
+      const resData: any = await response.json();
       const text = resData.choices?.[0]?.message?.content;
       if (typeof text !== "string") {
-        console.warn("[RAG Backend] Agnes AI 返回异常格式，启动自动降级到 Google Gemini...");
-        return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+        throw new Error("Agnes AI 返回异常格式，未获取文本内容。");
       }
 
       return text;
     } catch (err: any) {
-      console.warn(`[RAG Backend] 请求 Agnes AI 对话流遭遇意外异常 (${err.message}). 启动自动降级到 Google Gemini...`);
-      return await getGeminiChatFallback(messages, temperature, responseFormatJson);
+      console.error("[RAG Backend] Agnes Chat 请求失败:", err);
+      throw err;
     }
   }
 
@@ -376,8 +249,8 @@ async function startServer() {
       const finalStage = current_stage || "STAGE_1_RECEIVE";
 
       // 智能安全加载：支持从环境变量或自定义密钥端获取认证密钥
-      const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
-      if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
+      const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
+      if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
         return res.status(400).json({
           error: "未挂载官方或自定义 API 密钥。请填参配置密钥后再行对话。"
         });
@@ -539,14 +412,14 @@ ${memoryContext}
       const prompt = `客户提问：${query}
 请立刻基于当前销售阶段及双路召回智库，发表完美的销冠回复：`;
 
-      console.log(`[RAG Backend] 正在请求统一对话分析服务 (Agnes-2.0-Flash 或备用 Gemini-2.5)，提问: "${query}"`);
+      console.log(`[RAG Backend] 正在请求统一对话分析服务 (Agnes-1.5-Flash)，提问: "${query}"`);
 
       const messages = [
         { role: "system", content: systemInstruction },
         { role: "user", content: prompt }
       ];
 
-      const text = await callAgnesChatWithFallback(messages, 0.3, false, resolvedApiKey);
+      const text = await callAgnesChat(messages, 0.3, false, resolvedApiKey);
       res.json({ answer: text, cloudMemories });
     } catch (err: any) {
       console.error("[RAG Backend] 遇到错误:", err);
@@ -574,7 +447,7 @@ ${memoryContext}
 
     // 核心中英文技术术语映射表，更精准命中
     const techBuzzwords = [
-      "react", "supabase", "postgres", "pgvector", "embedding", "vector", "database", "api", "gemini", "chunk", "rag", "routing",
+      "react", "supabase", "postgres", "pgvector", "embedding", "vector", "database", "api", "chunk", "rag", "routing",
       "typescript", "node", "server", "webpage", "sidepanel", "extension", "chrome", "sync", "memory", "client", "auth", "token", "diagnostic",
       "向量", "数据库", "模型", "记忆", "同步", "网页", "浏览器", "插件", "知识", "切片", "端点", "缓存", "检索", "对话", "连接"
     ];
@@ -616,8 +489,8 @@ ${memoryContext}
         : content;
 
       // 获取 KEY 用于做 embedding 转向量
-      const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
-      if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
+      const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
+      if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
         return res.status(400).json({
           error: "未挂载 API 密钥。固化长期记忆需要先获取向量，请添加嵌入转换密钥。"
         });
@@ -683,8 +556,8 @@ ${memoryContext}
       const finalUserId = toValidUuid(user_id || "system_sales_default");
       const finalStage = current_stage || "STAGE_1_RECEIVE";
 
-      const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
-      if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
+      const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
+      if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
         return res.status(400).json({
           error: "未挂载 API 密钥。建立分块向量模型需要获取 Embedding 权限，请在 Settings 或侧栏中配置密钥。"
         });
@@ -750,7 +623,7 @@ ${memoryContext}
           }
         ];
 
-        fileContentText = await callAgnesChatWithFallback(messages, 0.3, false, resolvedApiKey);
+        fileContentText = await callAgnesChat(messages, 0.3, false, resolvedApiKey);
       } else {
         // 常规文本格式 (TXT, Markdown, JSON, CSV 等)
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
@@ -905,8 +778,8 @@ ${memoryContext}
         ? clientMessages[clientMessages.length - 1].text 
         : cleanedHistory[cleanedHistory.length - 1].text;
 
-      const resolvedApiKey = customApiKey || process.env.GEMINI_API_KEY;
-      if (!resolvedApiKey || resolvedApiKey === "MY_GEMINI_API_KEY") {
+      const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
+      if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
         return res.status(400).json({
           error: "未挂载 API 密钥。无法启动销冠思维引擎。"
         });
@@ -1100,7 +973,7 @@ ${memoryContext}
         { role: "user", content: prompt }
       ];
 
-      let responseText = await callAgnesChatWithFallback(messages, 0.35, true, resolvedApiKey);
+      let responseText = await callAgnesChat(messages, 0.35, true, resolvedApiKey);
       // 清洗可能存在的 markdown wrapping
       responseText = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
 
