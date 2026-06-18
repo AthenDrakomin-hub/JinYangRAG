@@ -386,6 +386,125 @@ async function startServer() {
           emoji: "🚀"
         }
       };
+      // ==================== v2.0 STAGE_SPEECH 群活跃话术生成（独立分支，不走销冠 prompt）====================
+      if (finalStage === 'STAGE_SPEECH') {
+        // ====== v2.0 STAGE_SPEECH 第一步：5 视角识别 Agent 并发协同 ======
+        // 5 个视角共享同一份业务文档上下文（memoryContext），并发识别不同维度
+        // 输出统一为一个 JSON 块
+        const identifySystemInstruction =
+          `你是群运营文档分析中枢，需要派出 5 个虚拟视角 agent 并发分析同一份业务文档。
+
+【5 个视角】
+1. 【场景识别 Agent】：从文档中识别"什么时间 / 什么节庆 / 什么事件 / 什么主题场景"适合做群活跃
+2. 【角色识别 Agent】：从文档中识别"群里有哪几类人 / 各自特征 / 各自说话风格 / 适合哪个时段出没"
+3. 【节奏识别 Agent】：从文档中识别"本场要几条话术 / 怎么排顺序 / 谁开场谁收尾 / 间隔多长"
+4. 【禁词识别 Agent】：从文档中识别"绝对不能说的词 / 数字 / 标的 / 承诺"（合规雷区）
+5. 【案例识别 Agent】：从文档中识别"优秀话术样板 / 经典句式 / 成功开场方式"
+
+【业务文档上下文】
+${memoryContext}
+
+【主需求】
+${query}
+
+【硬性输出要求】
+1. 严格输出 **一个** JSON 块，不要输出 JSON 外的任何文字
+2. JSON 字段：
+   {
+     "scenarios": [ { "name": "...", "trigger": "...", "timing": "..." } ],
+     "roles": [ { "name": "...", "trait": "...", "voice": "...", "bestTiming": "..." } ],
+     "rhythm": { "totalLines": 数字, "order": ["开场角色", "推进角色", "..."], "intervalHint": "..." },
+     "forbidden": [ "禁词1", "禁词2" ],
+     "caseSnippets": [ "优秀样板 1", "优秀样板 2" ]
+   }
+3. 每个数组至少 2 个元素；如果文档中找不到，明确标 null
+4. JSON 块格式严格：用 \`\`\`json 和 \`\`\` 包裹，便于解析`;
+
+        const identifyMessages = [
+          { role: "system", content: identifySystemInstruction },
+          { role: "user", content: "请按 5 视角分析上述业务文档并输出 JSON 块" }
+        ];
+
+        let identifyText = "";
+        try {
+          identifyText = await callAgnesChat(identifyMessages, 0.4, true, resolvedApiKey);
+        } catch (e) {
+          console.error("[RAG Backend] STAGE_SPEECH 第一步识别失败:", e);
+          identifyText = "";
+        }
+
+        // 解析识别 JSON（容错：可能含 ```json 围栏或纯 JSON）
+        let identifyJson = { scenarios: [], roles: [], rhythm: { totalLines: 0, order: [] }, forbidden: [], caseSnippets: [] };
+        try {
+          const jsonMatch = identifyText.match(/```json\s*([\s\S]+?)\s*```/) || identifyText.match(/(\{[\s\S]+?\})/);
+          const jsonStr = jsonMatch ? jsonMatch[1] : identifyText;
+          const parsed = JSON.parse(jsonStr);
+          identifyJson = Object.assign(identifyJson, parsed);
+        } catch (e) {
+          console.warn("[RAG Backend] 识别 JSON 解析失败，使用空骨架:", e && e.message);
+        }
+
+        // ====== v2.0 STAGE_SPEECH 第二步：多角色 Agent 编排生成 ======
+        // 抽取识别结果作为本次编排的硬性约束
+        const rolesList = (identifyJson.roles || []).map(r => `- ${r.name}（${r.trait || ''}，${r.voice || ''}）`).join('\n') || '- 老师\n- 老粉\n- 萌新';
+        const forbiddenList = (identifyJson.forbidden || []).join('、') || '（文档未识别到禁词）';
+        const rhythmOrder = (identifyJson.rhythm && identifyJson.rhythm.order && identifyJson.rhythm.order.length) ? identifyJson.rhythm.order.join(' → ') : '按角色自然轮换';
+        const totalLines = (identifyJson.rhythm && identifyJson.rhythm.totalLines) || 8;
+        const caseSnippets = (identifyJson.caseSnippets || []).slice(0, 2).join('\n  · ').slice(0, 400) || '（无样板）';
+
+        const orchestrateSystemInstruction =
+          `你是群运营多角色编排 Agent。上一阶段已完成 5 视角识别，现在你负责把识别结果编排成多角色群聊话术。
+
+【5 视角识别结果】
+- 角色清单：\n${rolesList}
+- 节奏顺序：${rhythmOrder}
+- 禁词表：${forbiddenList}
+- 案例样板：\n  · ${caseSnippets}
+
+【主需求】
+${query}
+
+【本场硬约束】
+- 总条数：**${totalLines} 条**（必须严格相等，不许多少）
+- 每个角色至少出现 1 次
+- 角色之间必须呼应 / 对答 / 递进，像真实群聊
+- 口语化断句，每条 15-50 字
+- 严禁出现具体股票代码、具体收益承诺、群规禁词
+- 严禁暴露你是 AI，严禁出现"群活跃""话术""阶段"等元术语
+- 不输出任何解释 / 标题 / 前缀 / 编号 / Markdown 符号
+- 格式严格：[角色名] 内容（每行一条）`;
+
+        const orchestrateMessages = [
+          { role: "system", content: orchestrateSystemInstruction },
+          { role: "user", content: "请按上述约束直接输出多角色群聊话术" }
+        ];
+
+        console.log(`[RAG Backend] STAGE_SPEECH 5 视角识别完成，进入编排阶段，总条数=${totalLines}`);
+
+        let speechText = "";
+        try {
+          speechText = await callAgnesChat(orchestrateMessages, 0.85, false, resolvedApiKey);
+        } catch (e) {
+          console.error("[RAG Backend] STAGE_SPEECH 编排失败:", e);
+          return res.json({
+            answer: `[编排失败] ${e && e.message ? e.message : e}`,
+            cloudMemories,
+            stage: 'STAGE_SPEECH',
+            identifyJson
+          });
+        }
+
+        return res.json({
+          answer: speechText,
+          cloudMemories,
+          stage: 'STAGE_SPEECH',
+          identifyJson,
+          totalLines
+        });
+      }
+      // ==================== /v2.0 STAGE_SPEECH 分支结束 ====================
+
+
 
       const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.STAGE_1_RECEIVE;
 

@@ -27,6 +27,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   
   // 核心：触发当前活动网页信息的自动提取
   await extractAndProcessActivePage();
+  // v2.0 话术生成模块初始化
+  initSpeechUI();
+  loadSpeechDocStatus();
 });
 
 // 1. 设置存储默认值
@@ -1039,4 +1042,298 @@ function formatMarkdown(text) {
   html = html.replace(/\n/g, "<br>");
 
   return html;
+}
+// ========================================================================
+// v2.0 群活跃话术生成模块（STAGE_SPEECH）
+// 核心：主人输入主需求 → 后端从 Supabase 文档自动识别（场景/角色/节奏/禁词/案例）→ 多 agent 协作生成
+// 主人手动复制到群（不做 fillToInput）
+// ========================================================================
+
+const SPEECH_STAGE = "STAGE_SPEECH";
+const SPEECH_DEFAULT_USER = "speech_default";
+let lastSpeechQuery = "";
+
+function initSpeechUI() {
+  const countInput = document.getElementById("speech-count");
+  const countLabel = document.getElementById("speech-count-label");
+  if (countInput && countLabel) {
+    countInput.addEventListener("input", () => {
+      countLabel.textContent = countInput.value;
+    });
+  }
+
+  const form = document.getElementById("speech-form");
+  if (form) {
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      generateSpeech(false);
+    });
+  }
+
+  const regenBtn = document.getElementById("speech-regenerate-btn");
+  if (regenBtn) {
+    regenBtn.addEventListener("click", () => generateSpeech(true));
+  }
+
+  const copyAllBtn = document.getElementById("speech-copy-all-btn");
+  if (copyAllBtn) {
+    copyAllBtn.addEventListener("click", copyAllSpeech);
+  }
+
+  const refreshDocsBtn = document.getElementById("speech-refresh-docs-btn");
+  if (refreshDocsBtn) {
+    refreshDocsBtn.addEventListener("click", loadSpeechDocStatus);
+  }
+}
+
+async function loadSpeechDocStatus() {
+  const docText = document.getElementById("speech-doc-text");
+  if (!docText) return;
+  docText.textContent = "正在检测 Supabase 群运营文档…";
+
+  const { supabaseUrl, supabaseKey, userId } = await readSpeechSettings();
+  if (!supabaseUrl || !supabaseKey) {
+    docText.textContent = "未配置 Supabase，请先在设置中填写 Supabase URL / Key";
+    return;
+  }
+
+  try {
+    const url = `${supabaseUrl}/rest/v1/documents?select=id,title&current_stage=eq.${SPEECH_STAGE}&user_id=eq.${userId || SPEECH_DEFAULT_USER}&limit=20`;
+    const resp = await fetch(url, {
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`
+      }
+    });
+    if (!resp.ok) {
+      docText.textContent = `文档拉取失败 (${resp.status})，请检查 Supabase 配置`;
+      return;
+    }
+    const docs = await resp.json();
+    if (!docs.length) {
+      docText.textContent = "尚未上传群运营文档（请到 Supabase Studio 的 documents 表手动插入，或先用销冠 stage 上传一份做模板）";
+      return;
+    }
+    docText.textContent = `已加载 ${docs.length} 份群运营文档，工具将自动识别场景/角色/节奏/禁词/案例`;
+  } catch (err) {
+    docText.textContent = "文档状态读取异常: " + (err && err.message ? err.message : err);
+  }
+}
+
+function readSpeechSettings() {
+  return new Promise((resolve) => {
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      chrome.storage.local.get(
+        ["apiUrl", "apiKey", "supabaseUrl", "supabaseKey", "userId"],
+        (res) => resolve({
+          apiUrl: res.apiUrl || defaultApiUrl,
+          apiKey: res.apiKey || "",
+          supabaseUrl: res.supabaseUrl || "",
+          supabaseKey: res.supabaseKey || "",
+          userId: res.userId || SPEECH_DEFAULT_USER
+        })
+      );
+    } else {
+      resolve({
+        apiUrl: defaultApiUrl,
+        apiKey: "",
+        supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL) || "",
+        supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY) || "",
+        userId: SPEECH_DEFAULT_USER
+      });
+    }
+  });
+}
+
+async function generateSpeech(isRegen) {
+  const input = document.getElementById("speech-input");
+  const countInput = document.getElementById("speech-count");
+  const genBtn = document.getElementById("speech-generate-btn");
+  const regenBtn = document.getElementById("speech-regenerate-btn");
+  const copyAllBtn = document.getElementById("speech-copy-all-btn");
+  const results = document.getElementById("speech-results");
+
+  if (!input || !countInput || !genBtn) return;
+
+  const query = (input.value || "").trim();
+  if (!query) {
+    input.focus();
+    return;
+  }
+  if (!isRegen) {
+    lastSpeechQuery = query;
+  } else if (!lastSpeechQuery) {
+    lastSpeechQuery = query;
+  }
+
+  const count = parseInt(countInput.value, 10) || 8;
+  const { apiUrl, apiKey, supabaseUrl, supabaseKey, userId } = await readSpeechSettings();
+
+  if (!apiUrl) {
+    renderSpeechError("未配置 API 地址，请先在设置里填 API URL");
+    return;
+  }
+
+  genBtn.disabled = true;
+  genBtn.textContent = "生成中…";
+  if (regenBtn) regenBtn.disabled = true;
+
+  const finalQuery = `${lastSpeechQuery}\n【本场生成条数】${count}`;
+
+  const payload = {
+    query: finalQuery,
+    context: "（话术生成模式：场景/角色/节奏/禁词/案例由后端从 Supabase 业务文档自动识别）",
+    customApiKey: apiKey || undefined,
+    user_id: userId,
+    current_stage: SPEECH_STAGE,
+    speech_count: count
+  };
+
+  try {
+    const resp = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      renderSpeechError("后端通信失败：" + t.slice(0, 200));
+      return;
+    }
+    const data = await resp.json();
+    const answer = (data && data.answer) || "";
+    if (!answer) {
+      renderSpeechError("后端未返回内容");
+      return;
+    }
+    const lines = parseSpeechLines(answer);
+    if (!lines.length) {
+      renderSpeechError("未能解析出 [角色] 内容，可能识别失败。原始输出：" + answer.slice(0, 300));
+      return;
+    }
+    window.__lastSpeechLines = lines;
+    renderSpeechResults(lines, data);
+    if (regenBtn) regenBtn.style.display = "inline-block";
+    if (copyAllBtn) copyAllBtn.style.display = "inline-block";
+  } catch (err) {
+    renderSpeechError("请求异常：" + (err && err.message ? err.message : err));
+  } finally {
+    genBtn.disabled = false;
+    genBtn.textContent = "生成话术";
+    if (regenBtn) regenBtn.disabled = false;
+  }
+}
+
+function parseSpeechLines(text) {
+  const lines = [];
+  const regex = /^\s*\[([^\]]+)\]\s*(.+?)$/gm;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const role = m[1].trim();
+    const content = m[2].trim();
+    if (role && content) {
+      lines.push({ role, content });
+    }
+  }
+  return lines;
+}
+
+function renderSpeechResults(lines, rawData) {
+  const results = document.getElementById("speech-results");
+  if (!results) return;
+  results.innerHTML = "";
+
+  const meta = document.createElement("div");
+  meta.style.cssText = "font-size:11px; color:var(--text-secondary); padding: 6px 0; display:flex; justify-content:space-between; align-items:center;";
+  const stageTag = (rawData && rawData.stage) || SPEECH_STAGE;
+  meta.innerHTML = `<span>共 ${lines.length} 条 / 已识别 ${new Set(lines.map(l => l.role)).size} 个角色</span><span style="font-family:monospace; font-size:10px;">${stageTag}</span>`;
+  results.appendChild(meta);
+
+  const grouped = {};
+  lines.forEach((l, i) => {
+    if (!grouped[l.role]) grouped[l.role] = [];
+    grouped[l.role].push({ idx: i, content: l.content });
+  });
+  Object.keys(grouped).forEach((role) => {
+    const roleHeader = document.createElement("div");
+    roleHeader.style.cssText = "font-size:11px; font-weight:600; color: var(--accent-color); margin: 8px 0 4px 0; padding: 4px 0; border-bottom: 1px solid var(--border-color);";
+    roleHeader.textContent = `${role} · ${grouped[role].length} 条`;
+    results.appendChild(roleHeader);
+
+    grouped[role].forEach((it) => {
+      const card = document.createElement("div");
+      card.className = "speech-item";
+      card.style.cssText = "background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 4px; font-size: 12px; line-height: 1.5; display:flex; align-items:flex-start; gap:8px;";
+      card.innerHTML = `
+        <span style="flex:1; color: var(--text-primary);">${escapeHtml(it.content)}</span>
+        <button class="btn-icon speech-copy-btn" data-idx="${it.idx}" title="复制本条" style="width:22px; height:22px; flex:0 0 22px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      `;
+      results.appendChild(card);
+    });
+  });
+
+  results.querySelectorAll(".speech-copy-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx, 10);
+      copySpeechLine(idx);
+    });
+  });
+}
+
+function renderSpeechError(msg) {
+  const results = document.getElementById("speech-results");
+  if (!results) return;
+  results.innerHTML = `<div class="panel-empty" style="color:#f87171;">${escapeHtml(msg)}</div>`;
+}
+
+function copySpeechLine(idx) {
+  const lines = window.__lastSpeechLines || [];
+  const target = lines[idx];
+  if (!target) return;
+  copyToClipboard(`[${target.role}] ${target.content}`);
+}
+
+function copyAllSpeech() {
+  const lines = window.__lastSpeechLines || [];
+  if (!lines.length) return;
+  const text = lines.map(l => `[${l.role}] ${l.content}`).join("\n");
+  copyToClipboard(text);
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(flashCopyOk, () => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed; top:-1000px; left:0;";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); flashCopyOk(); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+function flashCopyOk() {
+  const tip = document.createElement("div");
+  tip.textContent = "✓ 已复制";
+  tip.style.cssText = "position:fixed; top:12px; right:12px; z-index:9999; background-color: var(--accent-color); color: #0f172a; font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: var(--radius-sm); box-shadow: 0 2px 6px rgba(0,0,0,0.3);";
+  document.body.appendChild(tip);
+  setTimeout(() => tip.remove(), 1200);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
