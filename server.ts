@@ -733,39 +733,41 @@ async function startServer() {
         // 5 个视角共享同一份业务文档上下文（memoryContext），并发识别不同维度
         // 输出统一为一个 JSON 块
         const identifySystemInstruction =
-          `你是群聊语料分析中枢。输入是一份【真实群聊样本】（不是角色定义文档），请从语料中客观提取结构化信息。
+          `你是话术风格分析中枢。输入是一份【话术风格参照文档】（可能是群聊样本/话术库/运营文档），请从语料中客观提取"话术风格特征"，用于后续批量生成同类风格的话术。
 
-【业务文档 - 群聊样本】
+【业务文档 - 话术风格参照】
 ${memoryContext}
 
 【主需求】
 ${query}
 
-【文档类型识别 - 硬性约束】
-- 输入是群聊样本：每行通常格式为"昵称, [时间戳] 消息内容"
-- 真实群成员的昵称（如：已销号、旺、A8、万三、元宝宝）是【实际说话的人】，不是系统要分配的角色
-- 群内【业务称谓】（如：老师、战友、顾问、同学、群主）是【对话中的称呼方式】，不是系统要分配的角色
-- 角色识别必须严格基于文档中真实出现的称谓/身份词，禁止自创新角色名
+【v2.2.9 文档定位 - 硬性约束】
+- 输入文档的角色：**风格参照**（让生成的话术贴近此风格），**不是话术来源**（不从这里直接提取话术片段）
+- 不要识别"角色"（不要输出"老师/老粉/萌新/答疑派"等任何角色名）
+- 不要输出"rhythm / order"等编排节奏字段
+- 不要输出"caseSnippets"作为提取对象
 
 【硬性输出要求 - 严格遵守】
 1. 纯 JSON（不要 markdown 围栏，不要解释/注释）
 2. 字段：
 {
-  "docType": "group_chat_sample",
-  "scenarios": [ { "name": "场景名", "trigger": "触发条件", "timing": "时段" } ],
-  "roles": [ { "name": "角色", "trait": "特征", "voice": "语气", "source": "原文证据" } ],
-  "rhythm": { "totalLines": 数字, "order": ["角色1","角色2"], "intervalHint": "间隔" },
-  "forbidden": [ "禁词1", "禁词2" ],
-  "caseSnippets": [ "样板1", "样板2" ]
+  "docType": "speech_style_reference",
+  "scenarios": [
+    { "name": "场景名（如：端午节祝福/早安问候/产品推荐/活动预热/晚间复盘）", "trigger": "触发条件", "timing": "时段" }
+  ],
+  "styleFeatures": {
+    "tone": "口吻（如：亲切/热情/沉稳/激情/幽默/煽动性）",
+    "sentencePattern": "句式偏好（如：短句为主/感叹句多/疑问引导/祈使句/反问句）",
+    "lengthRange": "单条话术字数范围（如：20-50字）",
+    "vocabulary": ["常用词1", "常用词2", "口头禅/标志性表达"],
+    "tabooWords": ["禁词1", "禁词2"],
+    "emojiUsage": "表情使用习惯（如：句末必带emoji/不用emoji/特定emoji）",
+    "examplePhrases": ["风格示例1（原文片段，体现风格用，不是要复制）", "风格示例2"]
+  },
+  "forbidden": ["禁词1", "禁词2"]
 }
-3. 角色识别铁律：
-   - 只从文档真实出现的【业务称谓/身份词】中提取（如：老师/战友/顾问/群主/同学/客服/老师）
-   - 禁止自创新角色名（绝对禁止：老粉、萌新、答疑派、托、水军、小白、大佬 等任何文档没出现过的词）
-   - 每个 role 必须带 "source" 字段，引用文档原文中至少一处该称谓出现的位置
-   - 如果文档没有出现任何业务称谓/身份词，roles 数组返回 []
-4. caseSnippets 必须是从文档中直接复制的真实话术片段（一字不改），不是改写/总结
-5. 找不到的字段用空数组 []，绝不输出 null
-6. 禁止：多逗号、未闭合、注释、单引号`;
+3. 找不到的字段用空数组 []，绝不输出 null
+4. 禁止：多逗号、未闭合、注释、单引号`;
 
         const identifyMessages = [
           { role: "system", content: identifySystemInstruction },
@@ -817,48 +819,65 @@ ${query}
         }
 
         // ====== v2.0 STAGE_SPEECH 第二步：多角色 Agent 编排生成 ======
-        // 抽取识别结果作为本次编排的硬性约束
-        const rolesList = '';
-        const forbiddenList = (identifyJson.forbidden || []).join('、') || '（文档未识别到禁词）';
-        const rhythmOrder = (identifyJson.rhythm && identifyJson.rhythm.order && identifyJson.rhythm.order.length) ? identifyJson.rhythm.order.join(' → ') : '按角色自然轮换';
-        const totalLines = (identifyJson.rhythm && identifyJson.rhythm.totalLines) || 8;
-        const caseSnippets = (identifyJson.caseSnippets || []).slice(0, 2).join('\n  · ').slice(0, 400) || '（无样板）';
+        // v2.2.9: 从 query 解析生成数量（如"生成 50 条"），默认 30 条
+        const countMatch = (query || '').match(/(\d+)\s*条/);
+        const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 30;
+        const totalLines = Math.min(Math.max(requestedCount, 5), 80); // 单次上限 80 条 (max_tokens 16384 限制)
 
+        // 抽取识别出的风格特征
+        const sf = identifyJson.styleFeatures || {};
+        const forbiddenList = (identifyJson.forbidden || []).join('、') || (sf.tabooWords || []).join('、') || '（文档未识别到禁词）';
+        const vocabList = (sf.vocabulary || []).slice(0, 10).join('、') || '（无）';
+        const examplePhrases = (sf.examplePhrases || []).slice(0, 3).join('\n  · ') || '（无）';
 
         const orchestrateSystemInstruction =
-          `你是群聊话术提取 Agent。上一阶段从群聊样本中识别出了真实话术片段（caseSnippets），现在负责精挑细选并重新组合成可用的群活跃话术库。
+          `你是群活跃话术批量生成 Agent。上一阶段已从话术风格参照文档中识别出"风格特征"，现在根据【主需求】批量生成 ${totalLines} 条单条独立话术，供业务方复制到群里使用。
 
-【5 视角识别结果 - 真实话术片段】
-- 真实话术片段：\n  · ${caseSnippets}
-- 禁词表：${forbiddenList}
+【风格特征识别结果】
+- 口吻：${sf.tone || '（未识别）'}
+- 句式偏好：${sf.sentencePattern || '（未识别）'}
+- 字数范围：${sf.lengthRange || '（未识别）'}
+- 常用词：${vocabList}
+- 禁词：${forbiddenList}
+- 表情使用：${sf.emojiUsage || '（未识别）'}
+- 风格示例（体现风格用，不是要复制）：\n  · ${examplePhrases}
 
-【主需求】
+【主需求 - 业务场景 + 数量】
 ${query}
 
-【v2.2.8 核心约束 - 严格遵守】
-1. **绝对禁止分配角色**：不输出 [老师] [老粉] [萌新] 等任何角色前缀
-2. **绝对禁止自创角色名**：禁止出现"老师/老粉/萌新/答疑派/托/水军/小白/大佬"等任何角色名
-3. **基于真实话术片段重组**：从 caseSnippets 中挑选 ${totalLines} 条最贴合需求的话术，可微调措辞/拼接/同义改写，但保留原文风格、口吻、句式
-4. **不输出对话交互**：禁止输出 A 说...B 说... 的对话格式，只输出单条独立话术（每行一条）
+【v2.2.9 核心约束 - 严格遵守】
+1. **绝对禁止输出角色前缀**：不输出 [老师] [老粉] [萌新] 等任何角色名
+2. **绝对禁止 A 说...B 说... 的对话格式**：每条都是独立的、可单独复制使用的话术
+3. **绝对禁止编号/标题/Markdown 符号**：1. 2. 3. - 1) 等都不允许
+4. **绝对禁止暴露 AI 身份**：不输出"作为AI"等元术语
+5. **绝对禁止使用禁词表中的任何词**
 
 【本场硬约束】
-- 总条数：**${totalLines} 条**（必须严格相等，不许多少）
-- 口语化断句，每条 15-50 字
-- 严禁出现具体股票代码、具体收益承诺、群规禁词
-- 严禁暴露你是 AI，严禁出现"群活跃""话术""阶段"等元术语
-- 不输出任何解释 / 标题 / 前缀 / 编号 / Markdown 符号
-- 格式严格：每行一条纯话术（不带角色前缀，不带 [xxx]）`;
+- 总条数：**${totalLines} 条**（必须严格相等，不许多少，不少）
+- 每条字数：${sf.lengthRange || '20-60 字'}
+- 风格：完全贴合风格特征（口吻/句式/常用词/表情）
+- 主题：紧扣【主需求】中的业务场景（如：端午节祝福/早安问候/产品推荐/活动预热）
+- 表达多样性：${totalLines} 条之间句式/用词/切入角度要尽量不同，避免重复套话
+- 每条话术独立成行（换行分隔），不带任何前缀/编号/角色名
+
+【输出格式示例】（仅供参考，不是要复制的内容）：
+今天市场不错，大家收获怎么样？🙌
+震荡行情别慌，逻辑对就拿住。💪
+尾盘资金异动，明天重点关注这条线。📈
+...`;
 
         const orchestrateMessages = [
           { role: "system", content: orchestrateSystemInstruction },
-          { role: "user", content: "请按上述约束直接输出多角色群聊话术" }
+          { role: "user", content: `请按上述约束直接输出 ${totalLines} 条单条话术` }
         ];
 
-        console.log(`[RAG Backend] STAGE_SPEECH 5 视角识别完成，进入编排阶段，总条数=${totalLines}`);
+        console.log(`[RAG Backend] STAGE_SPEECH 风格识别完成，进入批量生成阶段，总条数=${totalLines}`);
 
         let speechText = "";
         try {
-          speechText = await callAgnesChat(orchestrateMessages, 0.85, false, resolvedApiKey);
+          // max_tokens 按条数动态调整: 每条约 50 tokens + 缓冲
+          const dynamicMaxTokens = Math.min(totalLines * 60 + 200, 16384);
+          speechText = await callAgnesChat(orchestrateMessages, 0.85, false, resolvedApiKey, dynamicMaxTokens);
         } catch (e) {
           console.error("[RAG Backend] STAGE_SPEECH 编排失败:", e);
           return res.json({
