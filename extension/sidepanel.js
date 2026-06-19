@@ -42,11 +42,7 @@ async function setupStorageDefaults() {
     } else {
       document.getElementById("setting-user-id").value = "system_sales_default";
     }
-    if (result.currentStage) {
-      document.getElementById("current-stage-selector").value = result.currentStage;
-    } else {
-      document.getElementById("current-stage-selector").value = "STAGE_1_RECEIVE";
-    }
+    // v2.3.0: 思维引擎锁定阶段已删除，不再读 currentStage
   };
 
   const fallbackValues = {
@@ -55,7 +51,6 @@ async function setupStorageDefaults() {
     // v2.2: Google 配置已删除
     // v2.2: Supabase 配置已删除
     userId: localStorage.getItem("userId"),
-    currentStage: localStorage.getItem("currentStage")
   };
 
   if (typeof chrome !== "undefined" && chrome.storage) {
@@ -100,7 +95,6 @@ async function getExtensionSettings() {
     // v2.2: Google 配置已删除
     // v2.2: Supabase 配置已删除
     userId: localStorage.getItem("userId"),
-    currentStage: localStorage.getItem("currentStage")
   };
 }
 
@@ -265,7 +259,7 @@ async function handleUserQuestion(query) {
     
     if (typeof chrome !== "undefined" && chrome.storage) {
       const settings = await new Promise((resolve) => {
-        chrome.storage.local.get(["apiUrl", "apiKey", "userId", "currentStage"], (res) => resolve(res));
+        chrome.storage.local.get(["apiUrl", "apiKey", "userId"], (res) => resolve(res));
       });
       if (settings.apiUrl) apiUrl = settings.apiUrl;
       if (settings.apiKey) customApiKey = settings.apiKey;
@@ -286,7 +280,7 @@ async function handleUserQuestion(query) {
       context: contextContent,
       customApiKey: customApiKey || undefined,
       user_id: userId,
-      current_stage: currentStage
+      // v2.3.0: 销冠对话不传 current_stage，后端走 DEFAULT（统一销冠 prompt）
     };
 
     const response = await fetch(apiUrl, {
@@ -502,7 +496,8 @@ function initSpeechUI() {
         const settings = await getExtensionSettings();
         const apiUrl = settings.apiUrl || defaultApiUrl;
         const userId = settings.userId || "system_sales_default";
-        const currentStage = stageSelect.value;
+        // v2.3.0: 上传阶段下拉已删除，统一 hardcode STAGE_SPEECH
+        const currentStage = "STAGE_SPEECH";
         const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
         const res = await fetch(endpoint, {
           method: "POST",
@@ -999,32 +994,19 @@ function setupUIEventHandlers() {
     });
   }
 
-  // ② 阶段选择器
-  const stageSelector = document.getElementById("current-stage-selector");
-  if (stageSelector) {
-    stageSelector.addEventListener("change", (e) => {
-      const activeStage = e.target.value;
-      if (typeof chrome !== "undefined" && chrome.storage) {
-        chrome.storage.local.set({ currentStage: activeStage });
-      } else {
-        localStorage.setItem("currentStage", activeStage);
-      }
-    });
-  }
-
-  // ③ 保存设置（只存 userId，supabase/apiUrl/apiKey 走 v2.2 后端 env）
+  // v2.3.0: 阶段选择器事件绑定已删除
+  // ② 保存设置（只存 userId，supabase/apiUrl/apiKey 走 v2.2 后端 env）
   const saveSettingsBtn = document.getElementById("save-settings-btn");
   if (saveSettingsBtn) {
     saveSettingsBtn.addEventListener("click", () => {
       const userIdValue = document.getElementById("setting-user-id").value.trim();
-      const stageValue = document.getElementById("current-stage-selector")?.value || "STAGE_1_RECEIVE";
+      // v2.3.0: 阶段选择器已删除，不再读 stageValue
       if (typeof chrome !== "undefined" && chrome.storage) {
-        chrome.storage.local.set({ userId: userIdValue, currentStage: stageValue }, () => {
+        chrome.storage.local.set({ userId: userIdValue }, () => {
           if (settingsPanel) settingsPanel.style.display = "none";
         });
       } else {
         localStorage.setItem("userId", userIdValue);
-        localStorage.setItem("currentStage", stageValue);
         if (settingsPanel) settingsPanel.style.display = "none";
       }
     });

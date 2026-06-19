@@ -557,7 +557,8 @@ async function startServer() {
       }
 
       const finalUserId = toValidUuid(user_id || "system_sales_default");
-      const finalStage = current_stage || "STAGE_1_RECEIVE";
+      // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
+      const finalStage = current_stage || "DEFAULT";
 
       // 智能安全加载：支持从环境变量或自定义密钥端获取认证密钥
       const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
@@ -659,16 +660,10 @@ async function startServer() {
               }
 
               if (!dbErr && dbDocs && Array.isArray(dbDocs)) {
-                // 严格进行租户隔离和阶段隔离
+                // v2.3.0: 销冠业务走统一池（user_id 隔离即可，不再按 stage 过滤）
                 const filteredDocs = dbDocs.filter((d: any) => {
                   const docUserId = toValidUuid(d.user_id || "system_sales_default");
-                  const docStage = d.current_stage;
-                  // 销冠 4 stage：user_id 隔离 + stage 严格匹配（行为不变）
-                  if (finalStage !== 'STAGE_SPEECH') {
-                    return docUserId === finalUserId && docStage === finalStage;
-                  }
-                  // STAGE_SPEECH：业务话术共享，不做 user_id 隔离，只按 stage 过滤
-                  return docStage === 'STAGE_SPEECH';
+                  return docUserId === finalUserId;
                 });
 
                 // P1: 多 query 合并检索 - 取每个 doc 在所有扩展 query 下的最高分
@@ -700,31 +695,17 @@ async function startServer() {
         ? cloudMemories.map((m: any, idx: number) => `[智库参考资料 #${idx+1}] -> ${m.content}`).join("\n\n")
         : "（长期库中未检索到与用户提问相关的特惠折扣、技术亮点、配置说明或售后解答数据）";
 
-      // 深度绑定上述 4 个销售阶段的高段位销冠思维 Prompt
+      // v2.3.0: STAGE_1-4 已删除，销冠业务走统一 DEFAULT prompt（合并 4 stage 共性）
+      // 销冠思维 = 记忆库（参考） + 本地网页（上下文） → 业务回复
       const STAGE_CONFIGS: Record<string, {
         name: string,
         instruction: string,
         emoji: string
       }> = {
-        STAGE_1_RECEIVE: {
-          name: "接待准备相识阶段",
-          instruction: "你现在处于【接待建立信任（建立客勤）】的接待准备相识阶段。回答需无比温暖大方、客气礼貌、贴心周到，表现出极强的服务素养和大商风范。回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促成交，重点在于解答客户心中疑惑、拉近日常距离、建立牢不可破的客勤关系。严禁泄密、严禁在回答中透露任何例如'接待准备‘、'销售阶段’、'租户'等任何学术或营销内部术语。结尾符合调性地自带一个且仅一个表情：🤝。",
-          emoji: "🤝"
-        },
-        STAGE_2_GROUP: {
-          name: "社群互动探需阶段",
-          instruction: "你现在处于【社群互动与技术探需（痛点剖析）】的社群解答阶段。回答应极具号召力和社群氛围感知力，善于通俗易懂地解构高精度和极其棘手的技术质疑，以绝对权威放大和剖析该环节的用户核心痛点。回答必须控制在 2~3 句以内。严禁自曝处于'社群'、'互动'、'答疑'等词汇。结尾自发附带灵感💡或火焰🔥表情之一。",
-          emoji: "💡"
-        },
-        STAGE_3_ACTIVATE: {
-          name: "私聊跟进邀约阶段",
-          instruction: "你现在处于【一对一私聊锁定（痛点深度触达）】的深度私聊激活阶段。应该无比敏锐而富有人文关怀、洞悉人性卡点并切中要害，针对客户提出的疑虑一针见血，并顺理成章、轻盈优雅地设下钩子引导开展微信语音沟通。回答必须控制在 2~3 句以内。严厉禁止泄露关于'私聊'、'锁定'、'话术'等字眼。结尾自发带有符合本阶段微细探求调性的目标🎯表情。",
+        DEFAULT: {
+          name: "统一销冠应答",
+          instruction: "你是顶级金牌业务销冠、洞悉人性的回复专家。回答需无比温暖大方、客气礼貌、贴心周到，表现出极强的服务素养和大商风范，能精准识别客户当下阶段（接待相识/探需答疑/邀约激活/临门收定）并切换到对应调性。回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促成交，重点在于解答客户心中疑惑。严禁泄密、严禁在回答中透露任何'阶段'、'话术'、'租户'等学术或营销内部术语。结尾符合调性地自带一个且仅一个表情：🤝/💡/🎯/🚀 之一。",
           emoji: "🎯"
-        },
-        STAGE_4_OPEN: {
-          name: "临门成交收定阶段",
-          instruction: "你现在处于【临门一脚成交逼单、锁定定金】的终极签约阶段。语气风格需展现出绝对的必胜把握、不容拒绝的真挚诚意以及无法抗拒的信任背书，帮他打消付款前的最后一厘米对安全性、工期或效果的顾虑，实现完美托底促单。回答必须控制在 2~3 句以内。严厉禁止提及'成交'、'逼单'、'收钱'等敏感情感字眼。结尾自发带有冲刺🚀或奖杯🏆表情之一。",
-          emoji: "🚀"
         }
       };
       // ==================== v2.0 STAGE_SPEECH 群活跃话术生成（独立分支，不走销冠 prompt）====================
@@ -910,7 +891,7 @@ ${query}
 
 
 
-      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.STAGE_1_RECEIVE;
+      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.DEFAULT;
 
       const systemInstruction = 
         `您是顶级金牌业务销冠、也是熟稔 Supabase pgvector 长期记忆的双路 RAG 知识检索专家。
@@ -1003,7 +984,8 @@ ${memoryContext}
       }
 
       const finalUserId = toValidUuid(user_id || "system_sales_default");
-      const finalStage = current_stage || "STAGE_1_RECEIVE";
+      // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
+      const finalStage = current_stage || "DEFAULT";
 
       // 提取核心关键词/标签，提高 Manage Memory 表格等页面的过滤及搜索精度
       const autoTags = extractKeywords(content);
@@ -1077,7 +1059,8 @@ ${memoryContext}
       }
 
       const finalUserId = toValidUuid(user_id || "system_sales_default");
-      const finalStage = current_stage || "STAGE_1_RECEIVE";
+      // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
+      const finalStage = current_stage || "DEFAULT";
 
       const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
@@ -1269,7 +1252,8 @@ ${memoryContext}
       }
 
       const finalUserId = toValidUuid(user_id || "system_sales_default");
-      const finalStage = current_stage || "STAGE_1_RECEIVE";
+      // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
+      const finalStage = current_stage || "DEFAULT";
 
       // Helper function to clean text: remove system tags, timestamps and emojis
       const filterMsgText = (txt: string): string => {
@@ -1384,16 +1368,10 @@ ${memoryContext}
               }
 
               if (!dbErr && dbDocs && Array.isArray(dbDocs)) {
-                // 严格进行租户隔离和阶段隔离
+                // v2.3.0: 销冠业务走统一池（user_id 隔离即可，不再按 stage 过滤）
                 const filteredDocs = dbDocs.filter((d: any) => {
                   const docUserId = toValidUuid(d.user_id || "system_sales_default");
-                  const docStage = d.current_stage;
-                  // 销冠 4 stage：user_id 隔离 + stage 严格匹配（行为不变）
-                  if (finalStage !== 'STAGE_SPEECH') {
-                    return docUserId === finalUserId && docStage === finalStage;
-                  }
-                  // STAGE_SPEECH：业务话术共享，不做 user_id 隔离，只按 stage 过滤
-                  return docStage === 'STAGE_SPEECH';
+                  return docUserId === finalUserId;
                 });
 
                 // P1: 多 query 合并检索 - 取每个 doc 在所有扩展 query 下的最高分
@@ -1425,34 +1403,20 @@ ${memoryContext}
         ? cloudMemories.map((m: any, idx: number) => `[智库参考资料 #${idx+1}] -> ${m.content}`).join("\n\n")
         : "（智库内未检索到关联的特惠、配置分型、报价或常见问题解答。此时请结合你的智囊常识返回双赢话术）";
 
+      // v2.3.0: STAGE_1-4 已删除，销冠业务走统一 DEFAULT prompt（合并 4 stage 共性）
       const STAGE_CONFIGS: Record<string, {
         name: string,
         instruction: string,
         emoji: string
       }> = {
-        STAGE_1_RECEIVE: {
-          name: "接待准备相识阶段",
-          instruction: "当前处于【接待建立信任（建立客勤）】的相识阶段。回复应无比温暖热情、客气贴心、展现服务素养。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促签约，结尾自带一个握手🤝或微笑😊表情。",
-          emoji: "🤝"
-        },
-        STAGE_2_GROUP: {
-          name: "社群互动探需阶段",
-          instruction: "当前处于【社群互动与技术探需（痛点剖析）】的互动解答阶段。应极具说服力、能通俗易懂拆解技术卡点，展现极强专业说服力以建立权威并放大痛点。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。在结尾带有灵感💡或火焰🔥表情。",
-          emoji: "💡"
-        },
-        STAGE_3_ACTIVATE: {
-          name: "私聊跟进邀约阶段",
-          instruction: "当前处于【一对一私聊锁定（痛点深度触达）】的微细跟进阶段。应该语气干练锐利、一针见血剖析难题，暗暗设下钩子吸引微信语音电话。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。在结尾带有目标🎯表情。",
+        DEFAULT: {
+          name: "统一销冠应答",
+          instruction: "你是顶级金牌销冠业务员。回复应无比温暖贴心、展现服务素养，能精准识别客户当下阶段（接待相识/探需答疑/邀约激活/临门收定）并切换到对应调性。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。严禁直接硬性逼单或催促签约，结尾自带一个 🤝/💡/🎯/🚀 之一表情。",
           emoji: "🎯"
-        },
-        STAGE_4_OPEN: {
-          name: "临门成交收定阶段",
-          instruction: "当前处于【临门一脚成交逼单、锁定定金】的最终签约阶段。语气风格展现出绝对的交付保障、不容抗拒的利益点突破和效果承诺，让客户打消付款前最后的顾虑成交。每套话术（solutionA/B/C）回答必须控制在 2~3 句以内。结尾带有冲刺🚀或奖杯🏆表情。",
-          emoji: "🚀"
         }
       };
 
-      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.STAGE_1_RECEIVE;
+      const activeStageConfig = STAGE_CONFIGS[finalStage] || STAGE_CONFIGS.DEFAULT;
 
       const prompt = `你是一个顶级金牌销冠业务员。你正在为前线的销售业务员出谋划策。
 请根据【客户当前的聊天上下文】以及【知识库中匹配的真实业务底单/产品白皮书规范】，进行精细的意图研判与情绪感知，并分别撰写三套针对性的高质量回复。
@@ -1463,7 +1427,7 @@ ${memoryContext}
 【你必须极其严格地遵守以下规则限制】：
 1. 绝对不能编造任何虚假保障、特大折扣优惠、超出文档的产品规格以及莫须有的安全背书。多渠道利用匹配到的【智库参考资料】。
 2. 【输出字数/句数强制红线】：方案 solutionA、solutionB、solutionC 的任何推荐话术，【每一段话推荐必须严格控制在 2~3 句以内】，地道、亲切、通俗易懂，契合 IM 会话场景。
-3. 【禁止泄密】：在任何情况下，严厉禁止在返回话术中直接泄露销售阶段的敏感名称与术语(例如 STAGE_1_RECEIVE、租户、多租户隔离、话术模板、STAGE_X 等官方研发或营销字眼)。
+3. 【禁止泄密】：在任何情况下，严厉禁止在返回话术中直接泄露任何学术或营销内部术语(例如阶段、话术模板、租户等)。
 4. 请以极高标准的纯净 JSON 格式返回这些结果，不需要任何 markdown 的 \`\`\`json 格式伪代码包裹！只需直接返回一个极其纯净、合法的 JSON。
 
 【JSON 返回格式范例】：
