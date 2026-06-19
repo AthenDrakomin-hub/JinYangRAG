@@ -21,7 +21,6 @@ let defaultApiUrl = "https://jinyangrag-production.up.railway.app/api/rag"; // �
 // 初始化 UI
 document.addEventListener("DOMContentLoaded", async () => {
   setupStorageDefaults();
-  setupUIEventHandlers();
   loadExtensionState();
   
   // 核心：触发当前活动网页信息的自动提取
@@ -29,6 +28,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // v2.0 话术生成模块初始化
   initSpeechUI();
   loadSpeechDocStatus();
+  setupUIEventHandlers();
+  // 默认激活"智能问答"tab（4 个 panel 都 hidden，靠 JS 强制显示 chat）
+  switchTab("chat");
 });
 
 // 1. 设置存储默认值
@@ -143,6 +145,14 @@ RAG 的工作流一般分为四个阶段：
   try {
     // 获取当活动标签页
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      // 主动消费可能的 lastError（chrome:// 页面下 query 会触发）
+      if (chrome.runtime.lastError) {
+        const errMsg = String(chrome.runtime.lastError.message || "");
+        webpageNameEl.textContent = errMsg.includes("chrome://")
+          ? "提示: 请切换到普通网页后再使用本扩展。"
+          : "无法访问当前标签页";
+        return;
+      }
       const activeTab = tabs[0];
       if (!activeTab) {
         webpageNameEl.textContent = "未找到活动标签页";
@@ -150,8 +160,8 @@ RAG 的工作流一般分为四个阶段：
       }
 
       // 如果是 Chrome 系统标签页，则无法注入脚本
-      if (activeTab.url && (activeTab.url.startsWith("chrome://") || activeTab.url.startsWith("edge://"))) {
-        webpageNameEl.textContent = "无法对浏览器系统页面提取文本";
+      if (activeTab.url && (activeTab.url.startsWith("chrome://") || activeTab.url.startsWith("edge://") || activeTab.url.startsWith("about:"))) {
+        webpageNameEl.textContent = "提示: 请切换到普通网页后再使用本扩展。";
         return;
       }
 
@@ -163,6 +173,11 @@ RAG 的工作流一般分为四个阶段：
             target: { tabId: activeTab.id },
             files: ["content.js"]
           }, () => {
+            // 消费 executeScript 可能的 lastError
+            if (chrome.runtime.lastError) {
+              webpageNameEl.textContent = "提示: 该页面不支持扩展注入，请切换到普通网页。";
+              return;
+            }
             // 重新尝试发送
             chrome.tabs.sendMessage(activeTab.id, { action: "extractText" }, (retryResponse) => {
               if (retryResponse && retryResponse.success) {
@@ -297,19 +312,10 @@ async function handleUserQuestion(query) {
     // 渲染完美的 AI 泡泡
     appendMessageBubble("ai", answer, matchedSources);
 
-    persistSession({
-      title: query,
-      answer,
-      timestamp: Date.now(),
-    });
+    persistSession(query, answer);
 
     if (matchedSources && matchedSources.length) {
-      persistMemory({
-        title: query,
-        content: matchedSources.map((s) => `【${s.rank}】${truncateText(s.chunk.text, 120)}`).join("\n"),
-        source: matchedSources[0]?.chunk?.url || webpageInfo.url || "本地",
-        timestamp: Date.now(),
-      });
+      persistMemory(query, answer, matchedSources);
     }
   } catch (error) {
     console.error("问答异常:", error);
@@ -507,6 +513,14 @@ function initSpeechUI() {
             current_stage: currentStage
           })
         });
+        const ct = res.headers.get("content-type") || "";
+        // 关键修复：后端/代理可能在 body 过大或服务异常时返回 HTML，必须先按 content-type 解析
+        if (!ct.includes("application/json")) {
+          const txt = await res.text();
+          statusEl.textContent = `❌ 后端返回非 JSON (HTTP ${res.status})：${txt.slice(0, 120)}`;
+          statusEl.style.color = "#ef4444";
+          return;
+        }
         const data = await res.json();
         if (!res.ok || !data.success) {
           statusEl.textContent = `❌ 失败：${data.error || "未知错误"}`;
@@ -767,4 +781,343 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// v2.2.4: 从 popup.js 复制的 5 个函数（sidepanel 缺这些导致卡死）
+function saveExtensionState() {
+  const sessionData = JSON.stringify(chatSessions);
+  const memoryData = JSON.stringify(memoryItems);
+  localStorage.setItem(STORAGE_KEY_SESSIONS, sessionData);
+  localStorage.setItem(LEGACY_STORAGE_KEY_SESSIONS, sessionData);
+  localStorage.setItem(STORAGE_KEY_MEMORIES, memoryData);
+  localStorage.setItem(LEGACY_STORAGE_KEY_MEMORIES, memoryData);
+}
+
+function renderSessions() {
+  const list = document.getElementById("sessions-list");
+  const empty = document.getElementById("sessions-empty");
+  if (!list || !empty) return;
+  list.innerHTML = "";
+  if (!chatSessions || chatSessions.length === 0) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  chatSessions.forEach((session) => {
+    const card = document.createElement("div");
+    card.className = "session-card";
+    card.innerHTML = `
+      <div class="session-card-header">
+        <div>
+          <div class="session-title">${session.title}</div>
+          <div class="session-meta">${new Date(session.createdAt).toLocaleString()}</div>
+        </div>
+        <button class="btn-secondary session-open-btn" data-id="${session.id}">查看</button>
+      </div>
+      <div class="session-content hidden">${formatMarkdown(session.answer ? session.answer : "(暂无回答)")}</div>
+    `;
+    list.appendChild(card);
+    const toggleBtn = card.querySelector(".session-open-btn");
+    const content = card.querySelector(".session-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "查看" : "收起";
+      });
+    }
+  });
+}
+
+function renderMemories() {
+  const list = document.getElementById("memory-list");
+  const empty = document.getElementById("memory-empty");
+  if (!list || !empty) return;
+  list.innerHTML = "";
+
+  const mergedMemories = [];
+  const seen = new Set();
+  [...cloudMemoryItems, ...memoryItems].forEach((memory) => {
+    if (!memory || !memory.id) return;
+    if (seen.has(memory.id)) return;
+    seen.add(memory.id);
+    mergedMemories.push(memory);
+  });
+
+  if (mergedMemories.length === 0) {
+    empty.classList.remove("hidden");
+    return;
+  }
+
+  empty.classList.add("hidden");
+  mergedMemories.forEach((memory) => {
+    const card = document.createElement("div");
+    card.className = "memory-card";
+    card.innerHTML = `
+      <div class="memory-card-header">
+        <div>
+          <div class="memory-title">${memory.title}</div>
+          <div class="memory-meta">${new Date(memory.createdAt).toLocaleString()}</div>
+        </div>
+        <button class="btn-secondary memory-toggle-btn" data-id="${memory.id}">详情</button>
+      </div>
+      <div class="memory-content hidden">${formatMarkdown(memory.snippet)}</div>
+      <div class="memory-source">来源：${memory.source || "当前网页"}</div>
+    `;
+    list.appendChild(card);
+    const toggleBtn = card.querySelector(".memory-toggle-btn");
+    const content = card.querySelector(".memory-content");
+    if (toggleBtn && content) {
+      toggleBtn.addEventListener("click", () => {
+        const expanded = content.classList.toggle("hidden");
+        toggleBtn.textContent = expanded ? "详情" : "收起";
+      });
+    }
+  });
+}
+
+function persistSession(query, answer) {
+  const session = {
+    id: `sess-${Date.now()}`,
+    title: query.length > 40 ? `${query.slice(0, 40)}...` : query,
+    createdAt: new Date().toISOString(),
+    query,
+    answer
+  };
+  chatSessions.unshift(session);
+  if (chatSessions.length > 20) {
+    chatSessions = chatSessions.slice(0, 20);
+  }
+  saveExtensionState();
+  renderSessions();
+}
+
+function persistMemory(query, answer, sources) {
+  const summary = answer.length > 120 ? `${answer.slice(0, 120)}...` : answer;
+  const memory = {
+    id: `memory-${Date.now()}`,
+    title: query.length > 50 ? `${query.slice(0, 50)}...` : query,
+    snippet: summary,
+    source: sources && sources.length > 0 ? sources[0].chunk.url || "当前网页" : "当前网页",
+    createdAt: new Date().toISOString()
+  };
+  memoryItems.unshift(memory);
+  if (memoryItems.length > 30) {
+    memoryItems = memoryItems.slice(0, 30);
+  }
+  saveExtensionState();
+  renderMemories();
+}
+
+// v2.2.4: fetchCloudMemories 简化版（v2.2 后 Supabase env 在后端，扩展不再传）
+async function fetchCloudMemories() {
+  try {
+    const settings = await getExtensionSettings();
+    const apiUrl = settings.apiUrl || defaultApiUrl;
+    const memoryEndpoint = buildBackendEndpoint(apiUrl, "api/memory/list");
+    const response = await fetch(memoryEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    if (!response.ok) {
+      cloudMemoryItems = [];
+      renderMemories();
+      return;
+    }
+    const data = await response.json();
+    if (data.success && Array.isArray(data.list)) {
+      cloudMemoryItems = data.list.map((item) => ({
+        id: item.id ? String(item.id) : `cloud-${Date.now()}-${Math.random()}`,
+        title: item.url || `Supabase 记忆 ${new Date(item.created_at || item.createdAt || Date.now()).toLocaleString()}`,
+        snippet: item.content ? String(item.content).slice(0, 140) : "(无内容摘要)",
+        source: "Supabase",
+        createdAt: item.created_at || item.createdAt || new Date().toISOString()
+      }));
+    } else {
+      cloudMemoryItems = [];
+    }
+  } catch (error) {
+    console.warn("获取 Supabase 记忆失败：", error);
+    cloudMemoryItems = [];
+  }
+  renderMemories();
+}
+
+// v2.2.4: 完整事件绑定（v2.2 误删，主人要求检查 4 tab）
+function setupUIEventHandlers() {
+  // ① 设置抽屉开关
+  const toggleSettingsBtn = document.getElementById("toggle-settings-btn");
+  const settingsPanel = document.getElementById("settings-panel");
+  if (toggleSettingsBtn && settingsPanel) {
+    toggleSettingsBtn.addEventListener("click", () => {
+      const isVisible = settingsPanel.style.display === "flex";
+      settingsPanel.style.display = isVisible ? "none" : "flex";
+    });
+  }
+
+  // ② 阶段选择器
+  const stageSelector = document.getElementById("current-stage-selector");
+  if (stageSelector) {
+    stageSelector.addEventListener("change", (e) => {
+      const activeStage = e.target.value;
+      if (typeof chrome !== "undefined" && chrome.storage) {
+        chrome.storage.local.set({ currentStage: activeStage });
+      } else {
+        localStorage.setItem("currentStage", activeStage);
+      }
+    });
+  }
+
+  // ③ 保存设置（只存 userId，supabase/apiUrl/apiKey 走 v2.2 后端 env）
+  const saveSettingsBtn = document.getElementById("save-settings-btn");
+  if (saveSettingsBtn) {
+    saveSettingsBtn.addEventListener("click", () => {
+      const userIdValue = document.getElementById("setting-user-id").value.trim();
+      const stageValue = document.getElementById("current-stage-selector")?.value || "STAGE_1_RECEIVE";
+      if (typeof chrome !== "undefined" && chrome.storage) {
+        chrome.storage.local.set({ userId: userIdValue, currentStage: stageValue }, () => {
+          if (settingsPanel) settingsPanel.style.display = "none";
+        });
+      } else {
+        localStorage.setItem("userId", userIdValue);
+        localStorage.setItem("currentStage", stageValue);
+        if (settingsPanel) settingsPanel.style.display = "none";
+      }
+    });
+  }
+
+  // ④ 刷新提取当前网页
+  const refreshPageBtn = document.getElementById("refresh-page-btn");
+  if (refreshPageBtn) {
+    refreshPageBtn.addEventListener("click", async () => {
+      const orig = refreshPageBtn.innerHTML;
+      refreshPageBtn.disabled = true;
+      refreshPageBtn.innerHTML = "...";
+      try {
+        await extractAndProcessActivePage();
+      } finally {
+        refreshPageBtn.disabled = false;
+        refreshPageBtn.innerHTML = orig;
+      }
+    });
+  }
+
+  // ⑤ 4 个 tab 切换
+  const tabButtons = document.querySelectorAll(".tab-btn");
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.getAttribute("data-tab");
+      if (tab) switchTab(tab);
+    });
+  });
+
+  // ⑥ 刷新记忆库
+  const refreshMemoryBtn = document.getElementById("refresh-memory-btn");
+  if (refreshMemoryBtn) {
+    refreshMemoryBtn.addEventListener("click", async () => {
+      refreshMemoryBtn.disabled = true;
+      const orig = refreshMemoryBtn.textContent;
+      refreshMemoryBtn.textContent = "刷新中...";
+      try {
+        await fetchCloudMemories();
+      } finally {
+        refreshMemoryBtn.disabled = false;
+        refreshMemoryBtn.textContent = orig || "刷新记忆库";
+      }
+    });
+  }
+
+  // ⑦ 清空会话
+  const clearSessionsBtn = document.getElementById("clear-sessions-btn");
+  if (clearSessionsBtn) {
+    clearSessionsBtn.addEventListener("click", () => {
+      if (typeof clearSessions === "function") {
+        clearSessions();
+      } else {
+        chatSessions = [];
+        saveExtensionState();
+        renderSessions();
+      }
+    });
+  }
+
+  // ⑧ 清空记忆库
+  const clearMemoryBtn = document.getElementById("clear-memory-btn");
+  if (clearMemoryBtn) {
+    clearMemoryBtn.addEventListener("click", () => {
+      if (typeof clearMemories === "function") {
+        clearMemories();
+      } else {
+        memoryItems = [];
+        saveExtensionState();
+        renderMemories();
+      }
+    });
+  }
+
+  // ⑨ 清空对话
+  const clearChatBtn = document.getElementById("clear-chat-btn");
+  if (clearChatBtn) {
+    clearChatBtn.addEventListener("click", () => {
+      const chatHistoryDiv = document.getElementById("chat-history");
+      if (!chatHistoryDiv) return;
+      chatHistoryDiv.innerHTML = `
+        <div class="welcome-box" id="welcome-box">
+          <div class="logo-icon-container large">
+            <svg class="jy-logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="50" cy="50" r="46" fill="url(#jy-bg-grad)" stroke="url(#jy-mint-grad)" stroke-width="2.5" />
+              <circle cx="50" cy="50" r="41" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="3 3" />
+              <path d="M 35 32 V 53 A 7 7 0 0 1 28 60 A 7 7 0 0 1 21 53" fill="none" stroke="url(#jy-slate-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M 47 32 L 56 45" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" />
+              <path d="M 65 32 L 56 45 L 70 59" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
+              <circle cx="75" cy="64" r="6.5" fill="none" stroke="url(#jy-mint-grad)" stroke-width="4.5" />
+              <circle cx="75" cy="64" r="2" fill="#fff" filter="url(#jy-glow)" />
+            </svg>
+          </div>
+          <h2 style="margin: 4px 0 0 0; font-size: 15px; font-weight: 600;">欢迎使用 Jin Yang RAG</h2>
+          <p>我们已从当前网页提取出能提取的全部正文，并在本地浏览器拆分为 <strong id="chunk-count">${webpageChunks.length}</strong> 个语义分块片段。</p>
+          <p style="font-size: 12px;">在下方提问，我们将利用本地相似度计算找出最相关的 Top 3 片段指引 Agnes-2.0-Flash 完成核心双路 RAG 智能问答！</p>
+        </div>
+      `;
+    });
+  }
+
+  // ⑩ 智能问答提交表单
+  const chatForm = document.getElementById("chat-form");
+  if (chatForm) {
+    chatForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const userInputField = document.getElementById("user-input");
+      if (!userInputField) return;
+      const query = userInputField.value.trim();
+      if (!query) return;
+      userInputField.value = "";
+      await handleUserQuestion(query);
+    });
+  }
+}
+
+// ⑪ 4 tab 切换
+function switchTab(tabName) {
+  const tabMap = {
+    speech: "speech-panel",
+    chat: "chat-panel",
+    sessions: "sessions-panel",
+    memory: "memory-panel"
+  };
+  const panelId = tabMap[tabName];
+  if (!panelId) return;
+  // 隐藏所有 panel
+  document.querySelectorAll(".panel-section").forEach((p) => p.classList.add("hidden"));
+  // 显示目标 panel
+  const target = document.getElementById(panelId);
+  if (target) target.classList.remove("hidden");
+  // 更新 tab 按钮 active
+  document.querySelectorAll(".tab-btn").forEach((b) => {
+    if (b.getAttribute("data-tab") === tabName) {
+      b.classList.add("active");
+    } else {
+      b.classList.remove("active");
+    }
+  });
 }

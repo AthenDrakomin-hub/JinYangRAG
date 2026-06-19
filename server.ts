@@ -159,7 +159,8 @@ async function startServer() {
   }
 
   // 解析 JSON 报文
-  app.use(express.json());
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
   // 为 Chrome 拓展跨域调用设计 CORS
   app.use((req, res, next) => {
@@ -294,6 +295,46 @@ async function startServer() {
       return res.status(500).json({ success: false, step: "exception", error: String(e), message: e?.message });
     }
   });
+
+  // v2.2.5-debug: 探测 AGNES embeddings 接口哪些模型名可用
+  app.get("/api/debug/embed-test", async (req, res) => {
+    const key = process.env.AGNES_API_KEY;
+    const base = (process.env.AGNES_API_BASE_URL || "https://apihub.agnes-ai.com/v1").replace(/\/?$/, "");
+    if (!key || key.startsWith("MY_")) {
+      return res.status(400).json({ error: "AGNES_API_KEY 未配置" });
+    }
+    const candidates = [
+      process.env.AGNES_EMBEDDING_MODEL || "agnes-2.0-flash",
+      "agnes-1.5-flash",
+      "agnes-2.0-flash",
+      "text-embedding-3-small",
+      "text-embedding-3-large",
+      "text-embedding-ada-002",
+      "bge-large-zh",
+      "bge-m3",
+      "m3e-large",
+      "embedding-2",
+      "embedding-3"
+    ];
+    const results = [];
+    for (const model of candidates) {
+      try {
+        const r = await fetch(`${base}/embeddings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+          body: JSON.stringify({ model, input: "test" })
+        });
+        const text = await r.text();
+        let parsed: any = null;
+        try { parsed = JSON.parse(text); } catch {}
+        results.push({ model, status: r.status, ok: r.ok, body: parsed || text.slice(0, 200) });
+      } catch (e: any) {
+        results.push({ model, status: 0, ok: false, error: e.message });
+      }
+    }
+    res.json({ base, results });
+  });
+
 
   // 读取磁盘上最新 Chrome 扩展文件，保障前端一键下包始终 100% 对齐
   app.get("/api/extension/files", async (req, res) => {

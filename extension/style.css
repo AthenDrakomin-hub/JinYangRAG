@@ -600,3 +600,22 @@ footer {
   font-size: 12px;
   font-family: monospace;
 }
+
+/* === 金阳龙纹水印背景（B 方案·2026-06-19） === */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: url('images/bg.png') no-repeat right bottom;
+  background-size: cover;
+  opacity: 0.10;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.container { position: relative; z-index: 1; }
+header { position: relative; z-index: 1; }
+.tab-container { position: relative; z-index: 1; }
+.welcome-box { position: relative; z-index: 1; }
+.speech-panel { position: relative; z-index: 1; }
+#chat-panel, #sessions-panel, #memory-panel { position: relative; z-index: 1; }
