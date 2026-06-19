@@ -190,6 +190,37 @@ async function startServer() {
     });
   });
 
+  // 临时诊断端点：v2.2.0-debug 用，直接在容器内跑 STAGE_SPEECH 直查并返回完整结果（不依赖 Railway logs）
+  app.get("/api/debug/speech-test", async (req, res) => {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_KEY;
+    if (!url || !key) {
+      return res.status(500).json({ error: "SUPABASE_URL/KEY 缺失", url, key: key ? "(set)" : "(missing)" });
+    }
+    try {
+      const supabase = createClient(url, key);
+      const t1 = Date.now();
+      const { data, error } = await supabase
+        .from("documents")
+        .select("id, content, url, current_stage")
+        .eq("current_stage", "STAGE_SPEECH")
+        .limit(10);
+      const ms = Date.now() - t1;
+      if (error) {
+        return res.json({ success: false, step: "supabase query", error: String(error), ms });
+      }
+      return res.json({
+        success: true,
+        ms,
+        count: data ? data.length : 0,
+        sample: data && data[0] ? { id: data[0].id, contentPreview: data[0].content.substring(0, 80) } : null,
+        ids: data ? data.map((d: any) => d.id.substring(0, 8)) : []
+      });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, step: "exception", error: String(e), message: e?.message });
+    }
+  });
+
   // 读取磁盘上最新 Chrome 扩展文件，保障前端一键下包始终 100% 对齐
   app.get("/api/extension/files", async (req, res) => {
     try {
