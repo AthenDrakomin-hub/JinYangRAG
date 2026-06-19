@@ -201,6 +201,69 @@ async function startServer() {
     });
   });
 
+  // 临时诊断端点：v2.2.0-debug 用，跑 STAGE_SPEECH 5 视角识别 agent 并返回原始输出 + 解析结果
+  app.get("/api/debug/identify-test", async (req, res) => {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_KEY;
+    const apiKey = process.env.AGNES_API_KEY;
+    if (!url || !key || !apiKey) {
+      return res.status(500).json({ error: "env 缺失", url: !!url, key: !!key, apiKey: !!apiKey });
+    }
+    try {
+      const supabase = createSupabaseClient(url, key);
+      const { data, error } = await supabase
+        .from("documents")
+        .select("id, content, url, current_stage")
+        .eq("current_stage", "STAGE_SPEECH")
+        .limit(10);
+      if (error) return res.status(500).json({ step: "supabase", error: String(error) });
+      const docs = data || [];
+      const memoryContext = docs.length
+        ? docs.map((m, idx) => `[智库参考资料 #${idx+1}] -> ${m.content}`).join("\n\n")
+        : "（无业务文档）";
+      const systemPrompt = `你是群运营文档分析中枢。\n\n【业务文档】\n${memoryContext}\n\n【主需求】生成3条投顾群活跃话术\n\n【硬性输出要求】输出一个 JSON，包含 scenarios/roles/rhythm/forbidden/caseSnippets 5 个字段。`;
+      const identifyText = await callAgnesChat(
+        [{ role: "system", content: systemPrompt }, { role: "user", content: "请输出 JSON" }],
+        0.4, true, apiKey, 4096
+      );
+      // 3 层容错解析
+      const safeParse = (text: string): { ok: boolean; result?: any; tried?: string[]; error?: string } => {
+        const tried: string[] = [];
+        if (!text || !text.trim()) return { ok: false, error: "empty", tried };
+        try { tried.push("direct"); return { ok: true, result: JSON.parse(text), tried }; } catch (e: any) { tried.push(`direct-fail:${e.message}`); }
+        const fence = text.match(/\`\`\`(?:json)?\s*([\s\S]+?)\s*\`\`\`/);
+        if (fence) { tried.push("fence"); try { return { ok: true, result: JSON.parse(fence[1]), tried }; } catch (e: any) { tried.push(`fence-fail:${e.message}`); } }
+        const start = text.indexOf("{");
+        if (start >= 0) {
+          let depth = 0, inStr = false, esc = false, end = -1;
+          for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (esc) { esc = false; continue; }
+            if (ch === "\\") { esc = true; continue; }
+            if (ch === "\"") { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (ch === "{") depth++;
+            else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+          }
+          if (end >= 0) { tried.push("balanced"); const cand = text.substring(start, end+1); try { return { ok: true, result: JSON.parse(cand), tried }; } catch (e: any) { tried.push(`balanced-fail:${e.message}`); } }
+          else { tried.push("balanced-not-found"); }
+        }
+        return { ok: false, error: "all-failed", tried };
+      };
+      const parseResult = safeParse(identifyText);
+      return res.json({
+        docsCount: docs.length,
+        memoryContextLength: memoryContext.length,
+        identifyTextLength: identifyText.length,
+        identifyTextPreview: identifyText.substring(0, 500),
+        identifyTextEnd: identifyText.length > 500 ? identifyText.substring(identifyText.length - 200) : "",
+        parse: parseResult
+      });
+    } catch (e: any) {
+      return res.status(500).json({ step: "exception", error: String(e), message: e?.message });
+    }
+  });
+
   // 临时诊断端点：v2.2.0-debug 用，直接在容器内跑 STAGE_SPEECH 直查并返回完整结果（不依赖 Railway logs）
   app.get("/api/debug/speech-test", async (req, res) => {
     const url = process.env.SUPABASE_URL;
