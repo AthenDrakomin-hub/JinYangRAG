@@ -192,10 +192,19 @@ async function startServer() {
   }
 
   // 1. Agnes AI 向量化计算辅助函数（P0: 失败时降级到本地伪 embedding）
+  // AGNES 平台已确认不提供 OpenAI 兼容的 /v1/embeddings 接口
+  // （实测 agnes-2.0-flash 全部返回 404 NotFoundError）
+  // 直接走本地伪 embedding，省掉每次白等 0.5s
+  let _agnesEmbedAvailable: boolean | null = null;
+
   async function getAgnesEmbedding(text: string, apiKey: string): Promise<number[]> {
     const finalKey = apiKey || process.env.AGNES_API_KEY;
     if (!finalKey || finalKey.startsWith("MY_")) {
       console.warn("[RAG Backend] AGNES_API_KEY 未配置，降级到本地伪 embedding");
+      return localHashEmbedding(text);
+    }
+
+    if (_agnesEmbedAvailable === false) {
       return localHashEmbedding(text);
     }
 
@@ -227,7 +236,14 @@ async function startServer() {
 
       return values;
     } catch (err: any) {
-      console.warn(`[RAG Backend] AGNES Embedding 失败，降级到本地伪 embedding: ${err.message}`);
+      const msg = String(err.message || '');
+      // AGNES 平台无 /v1/embeddings 接口（实测 404），置 flag 永久走本地
+      if (msg.includes('404') || msg.includes('NotFound') || msg.includes('Not Found')) {
+        _agnesEmbedAvailable = false;
+        console.warn("[RAG Backend] AGNES 不支持 embed 接口（已实测），永久降级到本地伪 embedding");
+      } else {
+        console.warn(`[RAG Backend] AGNES Embedding 失败，降级到本地伪 embedding: ${err.message}`);
+      }
       return localHashEmbedding(text);
     }
   }
