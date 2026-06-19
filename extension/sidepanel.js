@@ -1050,7 +1050,9 @@ function formatMarkdown(text) {
 // ========================================================================
 
 const SPEECH_STAGE = "STAGE_SPEECH";
-const SPEECH_DEFAULT_USER = "speech_default";
+// 注意：Supabase documents.user_id 是 uuid 类型，必须传 UUID
+// 这里用 server.ts toValidUuid('speech_default') 算出来的固定 UUID，前后端一致
+const SPEECH_DEFAULT_USER = "341c83e4-64f7-3f89-c375-e4c2242a572b";
 let lastSpeechQuery = "";
 
 function initSpeechUI() {

@@ -2,6 +2,9 @@
 -- 在 Supabase Studio 的 SQL Editor 中执行
 -- 作用：给现有 documents 表加 STAGE_SPEECH 支持 + 新建 speech_history 历史表
 
+-- ============== 0. 给 documents 表加 current_stage 字段（v1.0.1 表没有） ==============
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS current_stage TEXT NOT NULL DEFAULT 'STAGE_1_RECEIVE';
+
 -- ============== 1. 给 documents 表加索引（如果还没建） ==============
 -- current_stage + user_id 联合索引，加速 STAGE 隔离查询
 CREATE INDEX IF NOT EXISTS idx_documents_stage_user
