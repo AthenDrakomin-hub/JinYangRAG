@@ -733,26 +733,39 @@ async function startServer() {
         // 5 个视角共享同一份业务文档上下文（memoryContext），并发识别不同维度
         // 输出统一为一个 JSON 块
         const identifySystemInstruction =
-          `你是群运营文档分析中枢。分析业务文档，输出 JSON 描述：群运营场景/角色/节奏/禁词/案例。
+          `你是群聊语料分析中枢。输入是一份【真实群聊样本】（不是角色定义文档），请从语料中客观提取结构化信息。
 
-【业务文档】
+【业务文档 - 群聊样本】
 ${memoryContext}
 
 【主需求】
 ${query}
 
+【文档类型识别 - 硬性约束】
+- 输入是群聊样本：每行通常格式为"昵称, [时间戳] 消息内容"
+- 真实群成员的昵称（如：已销号、旺、A8、万三、元宝宝）是【实际说话的人】，不是系统要分配的角色
+- 群内【业务称谓】（如：老师、战友、顾问、同学、群主）是【对话中的称呼方式】，不是系统要分配的角色
+- 角色识别必须严格基于文档中真实出现的称谓/身份词，禁止自创新角色名
+
 【硬性输出要求 - 严格遵守】
 1. 纯 JSON（不要 markdown 围栏，不要解释/注释）
 2. 字段：
 {
+  "docType": "group_chat_sample",
   "scenarios": [ { "name": "场景名", "trigger": "触发条件", "timing": "时段" } ],
-  "roles": [ { "name": "角色", "trait": "特征", "voice": "语气", "bestTiming": "适合时段" } ],
+  "roles": [ { "name": "角色", "trait": "特征", "voice": "语气", "source": "原文证据" } ],
   "rhythm": { "totalLines": 数字, "order": ["角色1","角色2"], "intervalHint": "间隔" },
   "forbidden": [ "禁词1", "禁词2" ],
   "caseSnippets": [ "样板1", "样板2" ]
 }
-3. 找不到用空数组 []，绝不输出 null
-4. 禁止：多逗号、未闭合、注释、单引号`;
+3. 角色识别铁律：
+   - 只从文档真实出现的【业务称谓/身份词】中提取（如：老师/战友/顾问/群主/同学/客服/老师）
+   - 禁止自创新角色名（绝对禁止：老粉、萌新、答疑派、托、水军、小白、大佬 等任何文档没出现过的词）
+   - 每个 role 必须带 "source" 字段，引用文档原文中至少一处该称谓出现的位置
+   - 如果文档没有出现任何业务称谓/身份词，roles 数组返回 []
+4. caseSnippets 必须是从文档中直接复制的真实话术片段（一字不改），不是改写/总结
+5. 找不到的字段用空数组 []，绝不输出 null
+6. 禁止：多逗号、未闭合、注释、单引号`;
 
         const identifyMessages = [
           { role: "system", content: identifySystemInstruction },
@@ -811,11 +824,25 @@ ${query}
         const totalLines = (identifyJson.rhythm && identifyJson.rhythm.totalLines) || 8;
         const caseSnippets = (identifyJson.caseSnippets || []).slice(0, 2).join('\n  · ').slice(0, 400) || '（无样板）';
 
+        // 评估 roles 是否为"显式角色定义"还是仅"称谓"
+        // 称谓特征: source 字段引用的是对话中提到的称呼 (如"老师""战友""顾问")
+        // 角色定义特征: source 字段引用的是文档中显式列出的角色 (如"群内有以下几个角色")
+        // 简化判断: 如果 roles 都包含"老师""战友""顾问""同学"等典型称谓词, 当作称谓处理
+        const titleWords = ['老师', '战友', '顾问', '同学', '群主', '客服', '老师', '群友', '小伙伴'];
+        const allRolesAreTitles = (identifyJson.roles || []).length > 0 &&
+          (identifyJson.roles || []).every((r: any) => {
+            const name = r.name || '';
+            return titleWords.some(t => name.includes(t));
+          });
+        const hasExplicitRoles = (identifyJson.roles || []).length > 0 && !allRolesAreTitles;
+        const useRoleMode = hasExplicitRoles;
+
         const orchestrateSystemInstruction =
-          `你是群运营多角色编排 Agent。上一阶段已完成 5 视角识别，现在你负责把识别结果编排成多角色群聊话术。
+          `你是群聊话术编排 Agent。上一阶段已完成 5 视角识别，现在负责编排群活跃话术。
 
 【5 视角识别结果】
-- 角色清单：\n${rolesList}
+- 角色评估：**${useRoleMode ? '显式角色模式（可分配角色）' : '纯话术模式（不分角色）'}**
+- 角色清单：\n${rolesList || '（文档未显式定义角色，输出纯话术）'}
 - 节奏顺序：${rhythmOrder}
 - 禁词表：${forbiddenList}
 - 案例样板：\n  · ${caseSnippets}
@@ -825,13 +852,13 @@ ${query}
 
 【本场硬约束】
 - 总条数：**${totalLines} 条**（必须严格相等，不许多少）
-- 每个角色至少出现 1 次
-- 角色之间必须呼应 / 对答 / 递进，像真实群聊
+${useRoleMode ? '- 角色之间必须呼应 / 对答 / 递进，像真实群聊\n- 每个角色至少出现 1 次' : '- 不分配角色，不输出角色前缀'}
 - 口语化断句，每条 15-50 字
 - 严禁出现具体股票代码、具体收益承诺、群规禁词
 - 严禁暴露你是 AI，严禁出现"群活跃""话术""阶段"等元术语
 - 不输出任何解释 / 标题 / 前缀 / 编号 / Markdown 符号
-- 格式严格：[角色名] 内容（每行一条）`;
+- 风格贴合群聊样本原文（caseSnippets 给出的真实话术片段）
+${useRoleMode ? '- 格式严格：[角色名] 内容（每行一条）' : '- 格式：内容（每行一条，不带角色前缀）'}`;
 
         const orchestrateMessages = [
           { role: "system", content: orchestrateSystemInstruction },
