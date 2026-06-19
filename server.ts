@@ -168,6 +168,28 @@ async function startServer() {
     res.json({ status: "ok", time: new Date().toISOString() });
   });
 
+  // 临时诊断端点：v2.2.0-debug 用，主人可访问 /api/debug/env 看容器内 SUPABASE/AGNES 配置
+  app.get("/api/debug/env", async (req, res) => {
+    const url = process.env.SUPABASE_URL || "(undefined)";
+    const key = process.env.SUPABASE_KEY || "(undefined)";
+    const agnesKey = process.env.AGNES_API_KEY || "(undefined)";
+    const agnesBase = process.env.AGNES_API_BASE_URL || "https://apihub.agnes-ai.com/v1 (default)";
+    const agnesEmb = process.env.AGNES_EMBEDDING_MODEL || "agnes-2.0-flash (default)";
+    const agnesChat = process.env.AGNES_CHAT_MODEL || "agnes-2.0-flash (default)";
+    // 不暴露完整 key，只暴露 prefix + suffix + 长度
+    const safe = (s: string) => s.length > 20
+      ? `${s.substring(0, 12)}...${s.substring(s.length - 4)} (len=${s.length})`
+      : `(len=${s.length})`;
+    res.json({
+      SUPABASE_URL: url,
+      SUPABASE_KEY: safe(key),
+      AGNES_API_KEY: safe(agnesKey),
+      AGNES_API_BASE_URL: agnesBase,
+      AGNES_EMBEDDING_MODEL: agnesEmb,
+      AGNES_CHAT_MODEL: agnesChat
+    });
+  });
+
   // 读取磁盘上最新 Chrome 扩展文件，保障前端一键下包始终 100% 对齐
   app.get("/api/extension/files", async (req, res) => {
     try {
