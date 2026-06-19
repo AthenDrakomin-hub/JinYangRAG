@@ -274,7 +274,9 @@ async function startServer() {
               .select("id, content, url, current_stage")
               .eq("current_stage", "STAGE_SPEECH")
               .limit(10);
-            if (!speechErr && speechDocs && Array.isArray(speechDocs)) {
+            if (speechErr) {
+              console.error("[RAG Backend] STAGE_SPEECH 直查 SQL 错:", speechErr);
+            } else if (speechDocs && Array.isArray(speechDocs)) {
               cloudMemories = speechDocs.map((d: any) => ({
                 id: d.id,
                 content: d.content,
@@ -282,9 +284,11 @@ async function startServer() {
                 similarity: 0.8
               }));
               console.log(`[RAG Backend] STAGE_SPEECH 直查命中 ${cloudMemories.length} 条业务文档`);
+            } else {
+              console.warn("[RAG Backend] STAGE_SPEECH 直查无数据返回");
             }
           } catch (speechErr: any) {
-            console.error("[RAG Backend] STAGE_SPEECH 直查失败:", speechErr);
+            console.error("[RAG Backend] STAGE_SPEECH 直查异常:", speechErr);
           }
         } else {
         try {
