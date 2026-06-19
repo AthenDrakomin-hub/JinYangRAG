@@ -559,35 +559,26 @@ async function startServer() {
         // 5 个视角共享同一份业务文档上下文（memoryContext），并发识别不同维度
         // 输出统一为一个 JSON 块
         const identifySystemInstruction =
-          `你是群运营文档分析中枢，需要派出 5 个虚拟视角 agent 并发分析同一份业务文档。
+          `你是群运营文档分析中枢。分析业务文档，输出 JSON 描述：群运营场景/角色/节奏/禁词/案例。
 
-【5 个视角】
-1. 【场景识别 Agent】：从文档中识别"什么时间 / 什么节庆 / 什么事件 / 什么主题场景"适合做群活跃
-2. 【角色识别 Agent】：从文档中识别"群里有哪几类人 / 各自特征 / 各自说话风格 / 适合哪个时段出没"
-3. 【节奏识别 Agent】：从文档中识别"本场要几条话术 / 怎么排顺序 / 谁开场谁收尾 / 间隔多长"
-4. 【禁词识别 Agent】：从文档中识别"绝对不能说的词 / 数字 / 标的 / 承诺"（合规雷区）
-5. 【案例识别 Agent】：从文档中识别"优秀话术样板 / 经典句式 / 成功开场方式"
-
-【业务文档上下文】
+【业务文档】
 ${memoryContext}
 
 【主需求】
 ${query}
 
-【硬性输出要求 - 必须严格遵守】
-1. **纯 JSON 输出**：除了 JSON 本身，不输出任何其他文字、解释、注释、围栏符号
-2. **不要用 markdown 围栏**（不要 三个反引号 json 包裹），直接以 { 开头 } 结尾
-3. JSON 字段（字段名严格用以下英文，禁止中文 key）：
-   {
-     "scenarios": [ { "name": "...", "trigger": "...", "timing": "..." } ],
-     "roles": [ { "name": "...", "trait": "...", "voice": "...", "bestTiming": "..." } ],
-     "rhythm": { "totalLines": 数字, "order": ["开场角色", "推进角色", "..."], "intervalHint": "..." },
-     "forbidden": [ "禁词1", "禁词2" ],
-     "caseSnippets": [ "优秀样板 1", "优秀样板 2" ]
-   }
-4. 每个数组至少 2 个元素；找不到就留空数组 []
-5. **禁止**：多逗号、缺引号、未闭合、嵌套未闭合、注释、单引号、裸换行字符串
-6. 如果文档中找不到某个字段，直接用空数组 [] 代替，绝不输出 null`;
+【硬性输出要求 - 严格遵守】
+1. 纯 JSON（不要 markdown 围栏，不要解释/注释）
+2. 字段：
+{
+  "scenarios": [ { "name": "场景名", "trigger": "触发条件", "timing": "时段" } ],
+  "roles": [ { "name": "角色", "trait": "特征", "voice": "语气", "bestTiming": "适合时段" } ],
+  "rhythm": { "totalLines": 数字, "order": ["角色1","角色2"], "intervalHint": "间隔" },
+  "forbidden": [ "禁词1", "禁词2" ],
+  "caseSnippets": [ "样板1", "样板2" ]
+}
+3. 找不到用空数组 []，绝不输出 null
+4. 禁止：多逗号、未闭合、注释、单引号`;
 
         const identifyMessages = [
           { role: "system", content: identifySystemInstruction },
