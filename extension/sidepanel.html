@@ -40,7 +40,7 @@
           </svg>
         </div>
         <div>
-          <h1 class="title">金阳 RAG v1.0.0</h1>
+          <h1 class="title">金阳 RAG v2.2.0</h1>
         </div>
       </div>
       <div class="header-actions">
@@ -55,42 +55,17 @@
       </div>
     </header>
 
-     <!-- 配置抽屉 (可快捷更改服务端 URL 或者是本机的 API KEY) -->
+     <!-- 配置抽屉 (v2.2 精简：只保留业务标识 User ID；后端密钥/Supabase/Google 全部走后端环境变量) -->
     <div id="settings-panel" class="settings-panel">
       <div class="settings-group">
-        <label class="settings-label" for="setting-api-url">开发版服务代理 API 后台端点</label>
-        <input class="settings-input" id="setting-api-url" type="url" placeholder="例如 https://jinyangrag-production.up.railway.app/api/rag">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-user-id">租户用户识别码 (UUID 为佳，防止数据串线)</label>
-        <input class="settings-input" id="setting-user-id" type="text" placeholder="输入客户ID，如 system_sales_default">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-api-key">自定义 Agnes AI API 密钥 (可选，覆盖默认端点)</label>
-        <input class="settings-input" id="setting-api-key" type="password" placeholder="AI Studio 已在服务器底层安全挂载，此项选填">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-google-client-id">Google OAuth 客户端 ID</label>
-        <input class="settings-input" id="setting-google-client-id" type="text" placeholder="例如 1234-abc.apps.googleusercontent.com">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-google-api-key">Google API Key (Picker)</label>
-        <input class="settings-input" id="setting-google-api-key" type="text" placeholder="Google API Key">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-google-app-id">Google Project ID / App ID</label>
-        <input class="settings-input" id="setting-google-app-id" type="text" placeholder="Google Cloud Project ID">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-supabase-url">Supabase 项目 URL (云端记忆)</label>
-        <input class="settings-input" id="setting-supabase-url" type="url" placeholder="例如 https://your-project.supabase.co">
-      </div>
-      <div class="settings-group">
-        <label class="settings-label" for="setting-supabase-key">Supabase Anon Key 或 Service Role Key</label>
-        <input class="settings-input" id="setting-supabase-key" type="password" placeholder="Supabase Anon Key 或 Service Role Key">
+        <label class="settings-label" for="setting-user-id">租户用户识别码（业务标识）</label>
+        <input class="settings-input" id="setting-user-id" type="text" placeholder="如 system_sales_default（默认即可）">
+        <div class="panel-description" style="font-size: 10px; margin-top: 4px; color: var(--text-secondary);">
+          后端 API、Agnes AI 密钥、Supabase 配置、记忆库 全部已由服务端环境变量管理，无需在前端配置。
+        </div>
       </div>
       <div style="text-align: right; margin-top: 4px;">
-        <button id="save-settings-btn" class="btn-primary" style="padding: 4px 10px; font-size: 11px;">保存配置</button>
+        <button id="save-settings-btn" class="btn-primary" style="padding: 4px 10px; font-size: 11px;">保存</button>
       </div>
     </div>
 
@@ -176,11 +151,8 @@
       <div class="panel-description">本模块展示已保存的记忆片段，可辅助后续问答更稳健地调用相关历史知识。支持从 Supabase 云端同步读取。</div>
       <div class="memory-controls">
         <button id="refresh-memory-btn" class="btn-primary">刷新记忆库</button>
-        <button id="connect-drive-btn" class="btn-secondary">连接 Google Drive</button>
-        <button id="open-drive-picker-btn" class="btn-primary">从 Drive 导入</button>
         <button id="clear-memory-btn" class="btn-secondary">清空记忆库</button>
       </div>
-      <div id="drive-status" class="panel-description" style="font-size:11px; color:#9ca3af; margin-top:4px;">Google Drive 未连接（可忽略，建议用下方直接上传到 Supabase）。</div>
 
       <!-- 上传业务文档到 Supabase（v2.1 新增，绕过 Google Drive OAuth） -->
       <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-sm);">

@@ -262,6 +262,31 @@ async function startServer() {
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
 
       if (resolvedSupabaseUrl && resolvedSupabaseKey && resolvedSupabaseUrl !== "MY_SUPABASE_URL" && resolvedSupabaseKey !== "MY_SUPABASE_KEY") {
+        // v2.1 STAGE_SPEECH 优先走"拉全表 stage 文档"模式（不依赖 Embedding 相似度）
+        // 因为 v2.0 STAGE_SPEECH 的核心是 prompt 编排，相似度排序意义不大
+        // 业务文档量小（< 50 条），全表拉后丢给识别 agent 即可
+        if (finalStage === 'STAGE_SPEECH') {
+          try {
+            console.log(`[RAG Backend] STAGE_SPEECH 走业务文档直查模式（不依赖 Embedding）`);
+            const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+            const { data: speechDocs, error: speechErr } = await supabase
+              .from("documents")
+              .select("id, content, url, current_stage")
+              .eq("current_stage", "STAGE_SPEECH")
+              .limit(10);
+            if (!speechErr && speechDocs && Array.isArray(speechDocs)) {
+              cloudMemories = speechDocs.map((d: any) => ({
+                id: d.id,
+                content: d.content,
+                url: d.url || "",
+                similarity: 0.8
+              }));
+              console.log(`[RAG Backend] STAGE_SPEECH 直查命中 ${cloudMemories.length} 条业务文档`);
+            }
+          } catch (speechErr: any) {
+            console.error("[RAG Backend] STAGE_SPEECH 直查失败:", speechErr);
+          }
+        } else {
         try {
           console.log(`[RAG Backend] 正在计算提问词 "${query}" 的 Embedding 向量 (Agnes Embeddings Model)`);
           const queryEmbedding = await getAgnesEmbedding(query, resolvedApiKey);
@@ -357,6 +382,7 @@ async function startServer() {
         } catch (embedErr: any) {
           console.error("[RAG Backend] 计算向量 / 查询云端记忆库失败:", embedErr);
         }
+        } // <-- v2.1 STAGE_SPEECH 走独立分支，销冠 4 stage 维持原 Embedding 检索
       }
 
       // 格式化长期记忆召回详情入提示词
@@ -1148,9 +1174,10 @@ ${memoryContext}
   });
 
   // 3.1. 列出/检索存储在 Supabase 中的所有历史记忆
+  // v2.2: 新增 stage 过滤参数，让前端能按业务 stage 查文档（不再直调 Supabase REST）
   app.post("/api/memory/list", async (req, res) => {
     try {
-      const { supabaseUrl, supabaseKey, searchQuery } = req.body;
+      const { supabaseUrl, supabaseKey, searchQuery, stage } = req.body;
       const resolvedSupabaseUrl = supabaseUrl || process.env.SUPABASE_URL;
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
 
@@ -1159,7 +1186,12 @@ ${memoryContext}
       }
 
       const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
-      let query = supabase.from("documents").select("id, content, url, created_at");
+      // v2.2: 按需选择字段，有 stage 时只查必要列
+      let query = supabase.from("documents").select("id, content, url, created_at, current_stage");
+
+      if (stage && stage.trim() !== "") {
+        query = query.eq("current_stage", stage.trim());
+      }
 
       if (searchQuery && searchQuery.trim() !== "") {
         query = query.ilike("content", `%${searchQuery.trim()}%`);

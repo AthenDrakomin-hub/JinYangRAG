@@ -10,11 +10,10 @@ let chatHistory = [];
 let chatSessions = [];
 let memoryItems = [];
 let cloudMemoryItems = [];
-let googleDriveAccessToken = null;
+// v2.2: Google Drive 已删除
 const STORAGE_KEY_SESSIONS = "jinYang_chat_sessions";
 const STORAGE_KEY_MEMORIES = "jinYang_memory_items";
-const STORAGE_KEY_SUPABASE_URL = "jinYang_supabase_url";
-const STORAGE_KEY_SUPABASE_KEY = "jinYang_supabase_key";
+// v2.2: Supabase 配置已删除（全部走后端环境变量）
 const LEGACY_STORAGE_KEY_SESSIONS = "sp_chat_sessions";
 const LEGACY_STORAGE_KEY_MEMORIES = "sp_memory_items";
 let defaultApiUrl = "https://jinyangrag-production.up.railway.app/api/rag"; // 默认切换为你最新部署的 Railway 后端
@@ -35,33 +34,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 // 1. 设置存储默认值
 async function setupStorageDefaults() {
   const fillSettings = (result = {}) => {
-    if (result.apiUrl) {
-      document.getElementById("setting-api-url").value = result.apiUrl;
-    } else {
-      const currentOrigin = window.location.origin;
-      const fallbackUrl = currentOrigin.includes("chrome-extension") 
-        ? defaultApiUrl 
-        : `${currentOrigin}/api/rag`;
-      document.getElementById("setting-api-url").value = fallbackUrl;
-    }
-    if (result.apiKey) {
-      document.getElementById("setting-api-key").value = result.apiKey;
-    }
-    if (result.googleClientId) {
-      document.getElementById("setting-google-client-id").value = result.googleClientId;
-    }
-    if (result.googleApiKey) {
-      document.getElementById("setting-google-api-key").value = result.googleApiKey;
-    }
-    if (result.googleAppId) {
-      document.getElementById("setting-google-app-id").value = result.googleAppId;
-    }
-    if (result.supabaseUrl) {
-      document.getElementById("setting-supabase-url").value = result.supabaseUrl;
-    }
-    if (result.supabaseKey) {
-      document.getElementById("setting-supabase-key").value = result.supabaseKey;
-    }
+    // v2.2: apiUrl/apiKey/Google/Supabase 设置项已删除（全部走后端环境变量）
     if (result.userId) {
       document.getElementById("setting-user-id").value = result.userId;
     } else {
@@ -77,17 +50,14 @@ async function setupStorageDefaults() {
   const fallbackValues = {
     apiUrl: localStorage.getItem("apiUrl"),
     apiKey: localStorage.getItem("apiKey"),
-    googleClientId: localStorage.getItem("googleClientId"),
-    googleApiKey: localStorage.getItem("googleApiKey"),
-    googleAppId: localStorage.getItem("googleAppId"),
-    supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL),
-    supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY),
+    // v2.2: Google 配置已删除
+    // v2.2: Supabase 配置已删除
     userId: localStorage.getItem("userId"),
     currentStage: localStorage.getItem("currentStage")
   };
 
   if (typeof chrome !== "undefined" && chrome.storage) {
-    chrome.storage.local.get(["apiUrl", "apiKey", "googleClientId", "googleApiKey", "googleAppId", "supabaseUrl", "supabaseKey", "userId", "currentStage"], (result) => {
+    chrome.storage.local.get(["userId"], (result) => {
       if (result && Object.keys(result).length) {
         fillSettings(result);
       } else {
@@ -116,7 +86,7 @@ function loadExtensionState() {
 async function getExtensionSettings() {
   if (typeof chrome !== "undefined" && chrome.storage) {
     return await new Promise((resolve) => {
-      chrome.storage.local.get(["apiUrl", "apiKey", "googleClientId", "googleApiKey", "googleAppId", "supabaseUrl", "supabaseKey", "userId", "currentStage"], (result) => {
+      chrome.storage.local.get(["userId"], (result) => {
         resolve(result || {});
       });
     });
@@ -125,11 +95,8 @@ async function getExtensionSettings() {
   return {
     apiUrl: localStorage.getItem("apiUrl"),
     apiKey: localStorage.getItem("apiKey"),
-    googleClientId: localStorage.getItem("googleClientId"),
-    googleApiKey: localStorage.getItem("googleApiKey"),
-    googleAppId: localStorage.getItem("googleAppId"),
-    supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL),
-    supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY),
+    // v2.2: Google 配置已删除
+    // v2.2: Supabase 配置已删除
     userId: localStorage.getItem("userId"),
     currentStage: localStorage.getItem("currentStage")
   };
@@ -147,661 +114,7 @@ function buildBackendEndpoint(apiUrl, routeSuffix) {
   }
 }
 
-function updateDriveStatus(text, isError = false) {
-  const statusEl = document.getElementById("drive-status");
-  if (!statusEl) return;
-  statusEl.textContent = text;
-  statusEl.style.color = isError ? "#f87171" : "#9ca3af";
-}
 
-function parseUrlFragment(fragment) {
-  const params = {};
-  const stripped = fragment.startsWith("#") ? fragment.substring(1) : fragment;
-  stripped.split("&").forEach((pair) => {
-    const [key, value] = pair.split("=");
-    if (key) {
-      params[decodeURIComponent(key)] = decodeURIComponent(value || "");
-    }
-  });
-  return params;
-}
-
-async function getGoogleDriveToken() {
-  if (googleDriveAccessToken) {
-    return googleDriveAccessToken;
-  }
-
-  const settings = await getExtensionSettings();
-  const clientId = settings.googleClientId;
-  if (!clientId) {
-    throw new Error("请先在设置中填写 Google OAuth 客户端 ID。\n可在 Google Cloud Console 创建一个 OAuth 2.0 Client ID。");
-  }
-
-  const redirectUri = chrome.identity.getRedirectURL("google-drive");
-  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent("https://www.googleapis.com/auth/drive.readonly")}&include_granted_scopes=true&prompt=consent`;
-
-  return new Promise((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, (redirectUrl) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      if (!redirectUrl) {
-        reject(new Error("Google 登录返回结果为空。"));
-        return;
-      }
-      const url = new URL(redirectUrl);
-      const params = parseUrlFragment(url.hash);
-      if (!params.access_token) {
-        reject(new Error("未能获取到 Google 访问令牌，请检查 OAuth 客户端 ID 和授权设置。"));
-        return;
-      }
-      googleDriveAccessToken = params.access_token;
-      updateDriveStatus(`Google Drive 已连接 (${new Date().toLocaleTimeString()})`);
-      resolve(googleDriveAccessToken);
-    });
-  });
-}
-
-async function fetchGoogleDriveFiles(accessToken) {
-  const queryParts = [
-    "mimeType = 'application/vnd.google-apps.document'",
-    "mimeType = 'application/vnd.google-apps.spreadsheet'",
-    "mimeType = 'application/vnd.google-apps.presentation'",
-    "mimeType = 'application/pdf'",
-    "mimeType = 'text/plain'",
-    "mimeType = 'text/markdown'",
-    "mimeType = 'text/csv'",
-    "mimeType = 'application/octet-stream'"
-  ];
-  const q = `trashed = false and (${queryParts.join(" or ")})`;
-  const url = new URL("https://www.googleapis.com/drive/v3/files");
-  url.searchParams.set("pageSize", "30");
-  url.searchParams.set("q", q);
-  url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size)");
-  url.searchParams.set("orderBy", "modifiedTime desc");
-  url.searchParams.set("supportsAllDrives", "true");
-  url.searchParams.set("includeItemsFromAllDrives", "true");
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
-    }
-  });
-
-  if (response.status === 401) {
-    googleDriveAccessToken = null;
-    throw new Error("Google Drive 访问令牌已失效，请重新连接。");
-  }
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`获取 Drive 文件列表失败：${response.status} ${response.statusText} ${text}`);
-  }
-
-  const data = await response.json();
-  return Array.isArray(data.files) ? data.files : [];
-}
-
-function showGoogleDriveFileSelector(files) {
-  return new Promise((resolve, reject) => {
-    const existing = document.getElementById("google-drive-file-selector-overlay");
-    if (existing) {
-      existing.remove();
-    }
-
-    const overlay = document.createElement("div");
-    overlay.id = "google-drive-file-selector-overlay";
-    overlay.style = "position:fixed; inset:0; background: rgba(0,0,0,0.45); z-index:9999; display:flex; align-items:center; justify-content:center; padding:12px;";
-
-    const panel = document.createElement("div");
-    panel.style = "width:min(680px,100%); max-height:calc(100vh - 48px); background:#0f172a; border:1px solid #334155; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; color:#e2e8f0; box-shadow:0 20px 50px rgba(0,0,0,0.45);";
-    panel.innerHTML = `
-      <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 18px; background:#111827; border-bottom:1px solid #334155;">
-        <div>
-          <div style="font-size:14px; font-weight:700;">选择要导入的 Google Drive 文件</div>
-          <div style="font-size:12px; color:#94a3b8; margin-top:4px;">仅列出最近 30 个非回收站文件，支持文档、表格、幻灯片、PDF、文本等格式。</div>
-        </div>
-        <button id="google-drive-file-selector-close" style="border:none; background:none; color:#f8fafc; font-size:20px; cursor:pointer;">×</button>
-      </div>
-      <div id="google-drive-file-selector-list" style="overflow:auto; flex:1; padding:10px; display:grid; gap:8px; background:#0f172a;"></div>
-      <div style="display:flex; justify-content:flex-end; gap:8px; padding:12px 16px; background:#111827; border-top:1px solid #334155;">
-        <button id="google-drive-file-selector-cancel" style="padding:8px 14px; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; cursor:pointer;">取消</button>
-      </div>
-    `;
-
-    overlay.appendChild(panel);
-    document.body.appendChild(overlay);
-
-    const listEl = panel.querySelector("#google-drive-file-selector-list");
-    const closeBtn = panel.querySelector("#google-drive-file-selector-close");
-    const cancelBtn = panel.querySelector("#google-drive-file-selector-cancel");
-    if (!listEl || !closeBtn || !cancelBtn) {
-      reject(new Error("Drive 文件选择器初始化失败。"));
-      return;
-    }
-
-    const cleanup = () => {
-      if (overlay.parentNode) {
-        overlay.parentNode.removeChild(overlay);
-      }
-    };
-
-    const createFileItem = (file, index) => {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.style = "text-align:left; width:100%; padding:12px 14px; border:none; border-radius:10px; background:#111827; color:#e2e8f0; cursor:pointer; display:flex; justify-content:space-between; align-items:center; box-shadow: inset 0 0 0 1px rgba(148,163,184,0.08);";
-      item.innerHTML = `
-        <div style="max-width: calc(100% - 90px);">
-          <div style="font-size:13px; font-weight:600;">${index + 1}. ${file.name}</div>
-          <div style="font-size:11px; color:#94a3b8; margin-top:4px;">${file.mimeType} · ${file.modifiedTime ? new Date(file.modifiedTime).toLocaleString() : "未知修改时间"}</div>
-        </div>
-        <span style="font-size:11px; color:#7c3aed; margin-left:12px;">选择</span>
-      `;
-      item.addEventListener("click", () => {
-        cleanup();
-        resolve(file);
-      });
-      return item;
-    };
-
-    files.forEach((file, index) => listEl.appendChild(createFileItem(file, index)));
-    if (files.length === 0) {
-      listEl.innerHTML = `<div style="padding:18px; color:#cbd5e1;">未找到可导入的文件。</div>`;
-    }
-
-    const onCancel = () => {
-      cleanup();
-      reject(new Error("已取消 Google Drive 文件选择。"));
-    };
-
-    closeBtn.addEventListener("click", onCancel);
-    cancelBtn.addEventListener("click", onCancel);
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) {
-        onCancel();
-      }
-    });
-  });
-}
-
-async function openGoogleDriveFileBrowser(accessToken) {
-  const files = await fetchGoogleDriveFiles(accessToken);
-  if (!files.length) {
-    throw new Error("未找到可导入的 Google Drive 文件。请确认 Drive 中存在可访问的文档或 PDF。");
-  }
-  return showGoogleDriveFileSelector(files);
-}
-
-async function handleGoogleDriveConnect() {
-  try {
-    updateDriveStatus("正在连接 Google Drive...", false);
-    await getGoogleDriveToken();
-    updateDriveStatus("Google Drive 已连接。可继续点击“从 Drive 导入”。", false);
-  } catch (error) {
-    console.error(error);
-    updateDriveStatus(`Google Drive 连接失败：${error.message}`, true);
-  }
-}
-
-async function handleOpenDrivePicker() {
-  try {
-    const token = await getGoogleDriveToken();
-    const file = await openGoogleDriveFileBrowser(token);
-    updateDriveStatus(`已选择文件：${file.name}，开始导入...`, false);
-    await importDriveFile(file);
-  } catch (error) {
-    console.error(error);
-    updateDriveStatus(`从 Google Drive 导入失败：${error.message}`, true);
-  }
-}
-
-async function importDriveFile(file) {
-  const settings = await getExtensionSettings();
-  const apiUrl = settings.apiUrl || defaultApiUrl;
-  const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
-  const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
-  const userId = settings.userId || "system_sales_default";
-  const currentStage = settings.currentStage || "STAGE_1_RECEIVE";
-
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("请先配置 Supabase URL 和 Supabase Key，才能完成 Google Drive 文档导入。");
-  }
-  if (!googleDriveAccessToken) {
-    throw new Error("当前尚未获取 Google Drive 访问权限，请先点击连接 Google Drive。");
-  }
-
-  const importEndpoint = buildBackendEndpoint(apiUrl, "api/drive/import");
-  const response = await fetch(importEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      fileId: file.id,
-      fileName: file.name,
-      mimeType: file.mimeType,
-      accessToken: googleDriveAccessToken,
-      supabaseUrl,
-      supabaseKey,
-      user_id: userId,
-      current_stage: currentStage
-    })
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || data.message || `导入失败，HTTP ${response.status}`);
-  }
-  updateDriveStatus(`导入成功：${file.name}，共 ${data.importedChunks || 0}/${data.totalChunks || 0} 个片段。`, false);
-  await fetchCloudMemories();
-}
-
-async function fetchCloudMemories() {
-  const settings = await getExtensionSettings();
-  const apiUrl = settings.apiUrl || defaultApiUrl;
-  const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
-  const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
-
-  if (!supabaseUrl || !supabaseKey) {
-    cloudMemoryItems = [];
-    renderMemories();
-    return;
-  }
-
-  const memoryEndpoint = buildBackendEndpoint(apiUrl, "api/memory/list");
-  try {
-    const response = await fetch(memoryEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ supabaseUrl, supabaseKey })
-    });
-
-    if (!response.ok) {
-      cloudMemoryItems = [];
-      renderMemories();
-      return;
-    }
-
-    const data = await response.json();
-    if (data.success && Array.isArray(data.list)) {
-      cloudMemoryItems = data.list.map((item) => ({
-        id: item.id ? String(item.id) : `cloud-${Date.now()}-${Math.random()}`,
-        title: item.url || `Supabase 记忆 ${new Date(item.created_at || item.createdAt || Date.now()).toLocaleString()}`,
-        snippet: item.content ? String(item.content).slice(0, 140) : "(无内容摘要)",
-        source: "Supabase",
-        createdAt: item.created_at || item.createdAt || new Date().toISOString()
-      }));
-    } else {
-      cloudMemoryItems = [];
-    }
-  } catch (error) {
-    console.warn("获取 Supabase 记忆失败：", error);
-    cloudMemoryItems = [];
-  }
-
-  renderMemories();
-}
-
-function switchTab(tab) {
-  const sections = document.querySelectorAll(".panel-section");
-  sections.forEach((section) => {
-    section.classList.toggle("hidden", section.id !== `${tab}-panel`);
-  });
-  if (tab === "memory") {
-    renderMemories();
-    fetchCloudMemories();
-  }
-}
-
-function renderSessions() {
-  const sessionsList = document.getElementById("sessions-list");
-  const sessionsEmpty = document.getElementById("sessions-empty");
-  if (!sessionsList || !sessionsEmpty) return;
-
-  sessionsList.innerHTML = "";
-  if (!chatSessions.length) {
-    sessionsEmpty.classList.remove("hidden");
-    return;
-  }
-
-  sessionsEmpty.classList.add("hidden");
-  chatSessions.slice().reverse().forEach((session) => {
-    const item = document.createElement("div");
-    item.className = "session-card";
-    item.innerHTML = `
-      <div class="session-card-header">
-        <div>
-          <div class="session-title">${session.title}</div>
-          <div class="session-meta">${new Date(session.timestamp).toLocaleString()}</div>
-        </div>
-        <button class="btn-secondary session-toggle-btn" data-id="${session.timestamp}">查看</button>
-      </div>
-      <div class="session-content hidden">${formatMarkdown(session.answer || "[暂无回答]")}</div>
-    `;
-    sessionsList.appendChild(item);
-    const toggleBtn = item.querySelector(".session-toggle-btn");
-    const content = item.querySelector(".session-content");
-    if (toggleBtn && content) {
-      toggleBtn.addEventListener("click", () => {
-        const expanded = content.classList.toggle("hidden");
-        toggleBtn.textContent = expanded ? "查看" : "收起";
-      });
-    }
-  });
-}
-
-function renderMemories() {
-  const memoryList = document.getElementById("memory-list");
-  const memoryEmpty = document.getElementById("memory-empty");
-  if (!memoryList || !memoryEmpty) return;
-
-  memoryList.innerHTML = "";
-
-  const mergedMemories = [];
-  const seen = new Set();
-  [...cloudMemoryItems.slice().reverse(), ...memoryItems.slice().reverse()].forEach((memory) => {
-    if (!memory || !memory.id) return;
-    if (seen.has(memory.id)) return;
-    seen.add(memory.id);
-    mergedMemories.push(memory);
-  });
-
-  if (mergedMemories.length === 0) {
-    memoryEmpty.classList.remove("hidden");
-    return;
-  }
-
-  memoryEmpty.classList.add("hidden");
-  mergedMemories.forEach((memory) => {
-    const item = document.createElement("div");
-    item.className = "memory-card";
-    item.innerHTML = `
-      <div class="memory-card-header">
-        <div>
-          <div class="memory-title">${memory.title}</div>
-          <div class="memory-meta">${new Date(memory.timestamp || memory.createdAt).toLocaleString()} · 来源: ${memory.source || "本地"}</div>
-        </div>
-        <button class="btn-secondary memory-toggle-btn" data-id="${memory.timestamp || memory.id}">详情</button>
-      </div>
-      <div class="memory-content hidden">${formatMarkdown(memory.content)}</div>
-    `;
-    memoryList.appendChild(item);
-    const toggleBtn = item.querySelector(".memory-toggle-btn");
-    const content = item.querySelector(".memory-content");
-    if (toggleBtn && content) {
-      toggleBtn.addEventListener("click", () => {
-        const expanded = content.classList.toggle("hidden");
-        toggleBtn.textContent = expanded ? "详情" : "收起";
-      });
-    }
-  });
-}
-
-function saveExtensionState() {
-  const sessionData = JSON.stringify(chatSessions);
-  const memoryData = JSON.stringify(memoryItems);
-  localStorage.setItem(STORAGE_KEY_SESSIONS, sessionData);
-  localStorage.setItem(LEGACY_STORAGE_KEY_SESSIONS, sessionData);
-  localStorage.setItem(STORAGE_KEY_MEMORIES, memoryData);
-  localStorage.setItem(LEGACY_STORAGE_KEY_MEMORIES, memoryData);
-}
-
-function persistSession(session) {
-  chatSessions.push(session);
-  saveExtensionState();
-  renderSessions();
-}
-
-function persistMemory(memory) {
-  memoryItems.push(memory);
-  saveExtensionState();
-  renderMemories();
-}
-
-function clearSessions() {
-  if (!confirm("确定要清空所有会话历史吗？此操作不可恢复。")) return;
-  chatSessions = [];
-  saveExtensionState();
-  renderSessions();
-}
-
-function clearMemories() {
-  if (!confirm("确定要清空所有记忆库内容吗？此操作不可恢复。")) return;
-  memoryItems = [];
-  saveExtensionState();
-  renderMemories();
-}
-
-// 2. 交互节点配置
-function setupUIEventHandlers() {
-  // 设置面板显示与隐藏
-  const toggleSettingsBtn = document.getElementById("toggle-settings-btn");
-  const settingsPanel = document.getElementById("settings-panel");
-  toggleSettingsBtn.addEventListener("click", () => {
-    const isVisible = settingsPanel.style.display === "flex";
-    settingsPanel.style.display = isVisible ? "none" : "flex";
-  });
-
-  // 阶段选择器变动自动存储
-  const stageSelector = document.getElementById("current-stage-selector");
-  if (stageSelector) {
-    stageSelector.addEventListener("change", (e) => {
-      const activeStage = e.target.value;
-      if (typeof chrome !== "undefined" && chrome.storage) {
-        chrome.storage.local.set({ currentStage: activeStage });
-      }
-    });
-  }
-
-  // 保存设置按钮
-  const saveSettingsBtn = document.getElementById("save-settings-btn");
-  saveSettingsBtn.addEventListener("click", () => {
-    const apiUrlValue = document.getElementById("setting-api-url").value.trim();
-    const apiKeyValue = document.getElementById("setting-api-key").value.trim();
-    const supabaseUrlValue = document.getElementById("setting-supabase-url").value.trim();
-    const supabaseKeyValue = document.getElementById("setting-supabase-key").value.trim();
-    const userIdValue = document.getElementById("setting-user-id").value.trim();
-    
-    const googleClientIdValue = document.getElementById("setting-google-client-id").value.trim();
-    const googleApiKeyValue = document.getElementById("setting-google-api-key").value.trim();
-    const googleAppIdValue = document.getElementById("setting-google-app-id").value.trim();
-
-    if (typeof chrome !== "undefined" && chrome.storage) {
-      chrome.storage.local.set({ apiUrl: apiUrlValue, apiKey: apiKeyValue, googleClientId: googleClientIdValue, googleApiKey: googleApiKeyValue, googleAppId: googleAppIdValue, supabaseUrl: supabaseUrlValue, supabaseKey: supabaseKeyValue, userId: userIdValue }, () => {
-        alert("配置已成功保存！");
-        settingsPanel.style.display = "none";
-      });
-    } else {
-      localStorage.setItem("apiUrl", apiUrlValue);
-      localStorage.setItem("apiKey", apiKeyValue);
-      localStorage.setItem("googleClientId", googleClientIdValue);
-      localStorage.setItem("googleApiKey", googleApiKeyValue);
-      localStorage.setItem("googleAppId", googleAppIdValue);
-      localStorage.setItem(STORAGE_KEY_SUPABASE_URL, supabaseUrlValue);
-      localStorage.setItem(STORAGE_KEY_SUPABASE_KEY, supabaseKeyValue);
-      localStorage.setItem("userId", userIdValue);
-      alert("本地浏览器存储不可用，配置已暂存内存中");
-      settingsPanel.style.display = "none";
-    }
-  });
-
-  // 刷新提取页按钮
-  const refreshPageBtn = document.getElementById("refresh-page-btn");
-  refreshPageBtn.addEventListener("click", async () => {
-    const origStatus = refreshPageBtn.innerHTML;
-    refreshPageBtn.disabled = true;
-    refreshPageBtn.innerHTML = "...";
-    await extractAndProcessActivePage();
-    refreshPageBtn.disabled = false;
-    refreshPageBtn.innerHTML = origStatus;
-  });
-
-  // 标签页切换
-  const tabButtons = document.querySelectorAll(".tab-btn");
-  tabButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      tabButtons.forEach((btn) => btn.classList.remove("active"));
-      button.classList.add("active");
-      switchTab(button.dataset.tab);
-    });
-  });
-
-  const refreshMemoryBtn = document.getElementById("refresh-memory-btn");
-  if (refreshMemoryBtn) {
-    refreshMemoryBtn.addEventListener("click", async () => {
-      refreshMemoryBtn.disabled = true;
-      refreshMemoryBtn.textContent = "刷新中...";
-      await fetchCloudMemories();
-      refreshMemoryBtn.disabled = false;
-      refreshMemoryBtn.textContent = "刷新记忆库";
-      alert("记忆库已刷新。请检查记忆列表。");
-    });
-  }
-
-  const connectDriveBtn = document.getElementById("connect-drive-btn");
-  if (connectDriveBtn) {
-    connectDriveBtn.addEventListener("click", async () => {
-      connectDriveBtn.disabled = true;
-      connectDriveBtn.textContent = "连接中...";
-      await handleGoogleDriveConnect();
-      connectDriveBtn.disabled = false;
-      connectDriveBtn.textContent = "连接 Google Drive";
-    });
-  }
-
-  const openDrivePickerBtn = document.getElementById("open-drive-picker-btn");
-  if (openDrivePickerBtn) {
-    openDrivePickerBtn.addEventListener("click", async () => {
-      openDrivePickerBtn.disabled = true;
-      openDrivePickerBtn.textContent = "打开中...";
-      await handleOpenDrivePicker();
-      openDrivePickerBtn.disabled = false;
-      openDrivePickerBtn.textContent = "从 Drive 导入";
-    });
-  }
-
-  const clearSessionsBtn = document.getElementById("clear-sessions-btn");
-  if (clearSessionsBtn) {
-    clearSessionsBtn.addEventListener("click", () => {
-      clearSessions();
-    });
-  }
-
-  const clearMemoryBtn = document.getElementById("clear-memory-btn");
-  if (clearMemoryBtn) {
-    clearMemoryBtn.addEventListener("click", () => {
-      clearMemories();
-    });
-  }
-
-  // v2.1 上传业务文档到 Supabase（绕过 Google Drive OAuth）
-  const uploadDocBtn = document.getElementById("upload-doc-btn");
-  if (uploadDocBtn) {
-    uploadDocBtn.addEventListener("click", async () => {
-      const fileInput = document.getElementById("upload-doc-input");
-      const stageSelect = document.getElementById("upload-stage-select");
-      const statusEl = document.getElementById("upload-status");
-      const file = fileInput.files[0];
-      if (!file) {
-        statusEl.textContent = "⚠️ 请先选一个 .txt 或 .md 文件";
-        statusEl.style.color = "#ef4444";
-        return;
-      }
-      if (file.size > 5 * 1024 * 1024) {
-        statusEl.textContent = "⚠️ 文件太大（>5MB），请拆分后重试";
-        statusEl.style.color = "#ef4444";
-        return;
-      }
-      uploadDocBtn.disabled = true;
-      uploadDocBtn.textContent = "上传中...";
-      statusEl.textContent = "⏳ 正在读取文件并计算 Embedding...";
-      statusEl.style.color = "var(--text-secondary)";
-      try {
-        const content = await file.text();
-        const settings = await getExtensionSettings();
-        const apiUrl = settings.apiUrl || defaultApiUrl;
-        const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
-        const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
-        const userId = settings.userId || "system_sales_default";
-        const currentStage = stageSelect.value;
-
-        if (!supabaseUrl || !supabaseKey) {
-          statusEl.textContent = "❌ 请先在右上角齿轮 → 设置里填 Supabase URL + Key";
-          statusEl.style.color = "#ef4444";
-          return;
-        }
-
-        const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            content,
-            supabaseUrl,
-            supabaseKey,
-            user_id: userId,
-            current_stage: currentStage
-          })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          statusEl.textContent = `❌ 失败：${data.error || "未知错误"}`;
-          statusEl.style.color = "#ef4444";
-          return;
-        }
-        statusEl.textContent = `✅ 已上传：${file.name} → ${currentStage}（标签：${(data.tags || []).join(", ") || "无"}）`;
-        statusEl.style.color = "#10b981";
-        fileInput.value = "";
-        await fetchCloudMemories();
-      } catch (e) {
-        statusEl.textContent = `❌ 错误：${e.message}`;
-        statusEl.style.color = "#ef4444";
-      } finally {
-        uploadDocBtn.disabled = false;
-        uploadDocBtn.textContent = "上传到 Supabase";
-      }
-    });
-  }
-
-  // 清空对话
-  const clearChatBtn = document.getElementById("clear-chat-btn");
-  clearChatBtn.addEventListener("click", () => {
-    chatHistory = [];
-    const chatHistoryDiv = document.getElementById("chat-history");
-    chatHistoryDiv.innerHTML = `
-      <div class="welcome-box" id="welcome-box">
-        <div class="logo-icon-container large">
-          <svg class="jy-logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="50" cy="50" r="46" fill="url(#jy-bg-grad)" stroke="url(#jy-mint-grad)" stroke-width="2.5" />
-            <circle cx="50" cy="50" r="41" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="3 3" />
-            <path d="M 35 32 V 53 A 7 7 0 0 1 28 60 A 7 7 0 0 1 21 53" fill="none" stroke="url(#jy-slate-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
-            <path d="M 47 32 L 56 45" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" />
-            <path d="M 65 32 L 56 45 L 70 59" fill="none" stroke="url(#jy-mint-grad)" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round" />
-            <circle cx="75" cy="64" r="6.5" fill="none" stroke="url(#jy-mint-grad)" stroke-width="4.5" />
-            <circle cx="75" cy="64" r="2" fill="#fff" filter="url(#jy-glow)" />
-          </svg>
-        </div>
-        <h2 style="margin: 4px 0 0 0; font-size: 15px; font-weight: 600;">欢迎使用 Jin Yang RAG</h2>
-        <p>已经重置问答上下文。你可以再次输入新问题。</p>
-        <p>当前页面已切片为 <strong>${webpageChunks.length}</strong> 个片段。</p>
-      </div>
-    `;
-  });
-
-  // 表单提问提交
-  const chatForm = document.getElementById("chat-form");
-  chatForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const userInputField = document.getElementById("user-input");
-    const query = userInputField.value.trim();
-    if (!query) return;
-
-    // 清理输入框
-    userInputField.value = "";
-    await handleUserQuestion(query);
-  });
-}
-
-// 3. 提取活动标签页的文本内容并进行切片
 async function extractAndProcessActivePage() {
   const webpageNameEl = document.getElementById("webpage-name");
   const welcomeBox = document.getElementById("welcome-box");
@@ -1155,34 +468,90 @@ function initSpeechUI() {
   if (refreshDocsBtn) {
     refreshDocsBtn.addEventListener("click", loadSpeechDocStatus);
   }
+
+  // v2.2: 上传业务文档到 Supabase（走后端 API）
+  const uploadDocBtn = document.getElementById("upload-doc-btn");
+  if (uploadDocBtn) {
+    uploadDocBtn.addEventListener("click", async () => {
+      const fileInput = document.getElementById("upload-doc-input");
+      const stageSelect = document.getElementById("upload-stage-select");
+      const statusEl = document.getElementById("upload-status");
+      const file = fileInput && fileInput.files[0];
+      if (!file) {
+        statusEl.textContent = "⚠️ 请先选一个 .txt 或 .md 文件";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        statusEl.textContent = "⚠️ 文件太大（>5MB），请拆分后重试";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      uploadDocBtn.disabled = true;
+      uploadDocBtn.textContent = "上传中...";
+      statusEl.textContent = "⏳ 正在读取文件并计算 Embedding...";
+      statusEl.style.color = "var(--text-secondary)";
+      try {
+        const content = await file.text();
+        const settings = await getExtensionSettings();
+        const apiUrl = settings.apiUrl || defaultApiUrl;
+        const userId = settings.userId || "system_sales_default";
+        const currentStage = stageSelect.value;
+        const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            user_id: userId,
+            current_stage: currentStage
+          })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          statusEl.textContent = `❌ 失败：${data.error || "未知错误"}`;
+          statusEl.style.color = "#ef4444";
+          return;
+        }
+        statusEl.textContent = `✅ 已上传：${file.name} → ${currentStage}（标签：${(data.tags || []).join(", ") || "无"}）`;
+        statusEl.style.color = "#10b981";
+        fileInput.value = "";
+        await fetchCloudMemories();
+      } catch (e) {
+        statusEl.textContent = `❌ 错误：${e.message}`;
+        statusEl.style.color = "#ef4444";
+      } finally {
+        uploadDocBtn.disabled = false;
+        uploadDocBtn.textContent = "上传到 Supabase";
+      }
+    });
+  }
 }
 
 async function loadSpeechDocStatus() {
+  // v2.2: 走后端 API，不再直调 Supabase REST
   const docText = document.getElementById("speech-doc-text");
   if (!docText) return;
   docText.textContent = "正在检测 Supabase 群运营文档…";
 
-  const { supabaseUrl, supabaseKey, userId } = await readSpeechSettings();
-  if (!supabaseUrl || !supabaseKey) {
-    docText.textContent = "未配置 Supabase，请先在设置中填写 Supabase URL / Key";
-    return;
-  }
+  const settings = await getExtensionSettings();
+  const apiUrl = settings.apiUrl || defaultApiUrl;
+  const endpoint = buildBackendEndpoint(apiUrl, "api/memory/list");
 
   try {
-    const url = `${supabaseUrl}/rest/v1/documents?select=id,title&current_stage=eq.${SPEECH_STAGE}&user_id=eq.${userId || SPEECH_DEFAULT_USER}&limit=20`;
-    const resp = await fetch(url, {
-      headers: {
-        apikey: supabaseKey,
-        Authorization: `Bearer ${supabaseKey}`
-      }
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage: "STAGE_SPEECH" })
     });
     if (!resp.ok) {
-      docText.textContent = `文档拉取失败 (${resp.status})，请检查 Supabase 配置`;
+      docText.textContent = `文档拉取失败 (${resp.status})，后端未配置 Supabase`;
       return;
     }
-    const docs = await resp.json();
+    const data = await resp.json();
+    const docs = (data && data.list) || [];
     if (!docs.length) {
-      docText.textContent = "尚未上传群运营文档（请到 Supabase Studio 的 documents 表手动插入，或先用销冠 stage 上传一份做模板）";
+      docText.textContent = "尚未上传群运营文档（请到记忆库 tab 上传 .txt/.md，或在 Supabase Studio 手动插入）";
       return;
     }
     docText.textContent = `已加载 ${docs.length} 份群运营文档，工具将自动识别场景/角色/节奏/禁词/案例`;
@@ -1191,27 +560,15 @@ async function loadSpeechDocStatus() {
   }
 }
 
+// v2.2: readSpeechSettings 简化，只保留 userId（其他配置全走后端环境变量）
 function readSpeechSettings() {
   return new Promise((resolve) => {
     if (typeof chrome !== "undefined" && chrome.storage) {
-      chrome.storage.local.get(
-        ["apiUrl", "apiKey", "supabaseUrl", "supabaseKey", "userId"],
-        (res) => resolve({
-          apiUrl: res.apiUrl || defaultApiUrl,
-          apiKey: res.apiKey || "",
-          supabaseUrl: res.supabaseUrl || "",
-          supabaseKey: res.supabaseKey || "",
-          userId: res.userId || SPEECH_DEFAULT_USER
-        })
-      );
-    } else {
-      resolve({
-        apiUrl: defaultApiUrl,
-        apiKey: "",
-        supabaseUrl: localStorage.getItem(STORAGE_KEY_SUPABASE_URL) || "",
-        supabaseKey: localStorage.getItem(STORAGE_KEY_SUPABASE_KEY) || "",
-        userId: SPEECH_DEFAULT_USER
+      chrome.storage.local.get(["userId"], (res) => {
+        resolve({ userId: res.userId || SPEECH_DEFAULT_USER });
       });
+    } else {
+      resolve({ userId: SPEECH_DEFAULT_USER });
     }
   });
 }
@@ -1238,7 +595,10 @@ async function generateSpeech(isRegen) {
   }
 
   const count = parseInt(countInput.value, 10) || 8;
-  const { apiUrl, apiKey, supabaseUrl, supabaseKey, userId } = await readSpeechSettings();
+  const { userId } = await readSpeechSettings();
+  // v2.2: supabase 配置走后端环境变量；API URL 用 defaultApiUrl
+  const apiUrl = defaultApiUrl;
+  const apiKey = undefined;
 
   if (!apiUrl) {
     renderSpeechError("未配置 API 地址，请先在设置里填 API URL");
