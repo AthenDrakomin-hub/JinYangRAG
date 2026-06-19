@@ -47,6 +47,132 @@ async function startServer() {
     return dotProduct(a, b) / (m_a * m_b);
   }
 
+  // 本地伪 embedding fallback（AGNES 不支持 embed 模型时使用）
+  // 算法：字符级 1-3 n-gram + MurmurHash3 风格哈希桶 + L2 归一化
+  // 目标维度 768（与 Supabase pgvector vector(768) 字段一致），纯本地 <50ms
+  function localHashEmbedding(text: string, dim: number = 768): number[] {
+    const vec = new Array(dim).fill(0);
+    if (!text || text.length === 0) return vec;
+    const chars: number[] = [];
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c > 0x20) chars.push(c);
+    }
+    if (chars.length === 0) return vec;
+    function mix(h: number): number {
+      h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+      h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+      return (h ^ (h >>> 16)) >>> 0;
+    }
+    for (let i = 0; i < chars.length; i++) {
+      const h1 = mix(chars[i] ^ 0x9e3779b9);
+      vec[h1 % dim] += ((h1 >>> 31) & 1) ? 1 : -1;
+      if (i + 1 < chars.length) {
+        const h2 = mix((chars[i] * 31 + chars[i + 1]) ^ 0x9e3779b9);
+        vec[h2 % dim] += ((h2 >>> 31) & 1) ? 1 : -1;
+      }
+      if (i + 2 < chars.length) {
+        const h3 = mix(((chars[i] * 31 + chars[i + 1]) * 31 + chars[i + 2]) ^ 0x9e3779b9);
+        vec[h3 % dim] += ((h3 >>> 31) & 1) ? 1 : -1;
+      }
+    }
+    let mag = 0;
+    for (let i = 0; i < dim; i++) mag += vec[i] * vec[i];
+    mag = Math.sqrt(mag);
+    if (mag > 0) {
+      for (let i = 0; i < dim; i++) vec[i] /= mag;
+    }
+    return vec;
+  }
+
+  // P1: AGNES 查询扩展——把 query 扩成 3-5 个同义/近义表达，缓解伪向量在同义改写上的盲点
+  async function expandQueryWithAgnes(query: string, apiKey: string): Promise<string[]> {
+    const finalKey = apiKey || process.env.AGNES_API_KEY;
+    if (!finalKey || finalKey.startsWith("MY_")) return [query];
+    const trimmed = (query || "").trim();
+    if (!trimmed) return [query];
+    try {
+      const response = await fetch(`${AGNES_API_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${finalKey}`,
+          "User-Agent": "aistudio-build"
+        },
+        body: JSON.stringify({
+          model: AGNES_CHAT_MODEL,
+          messages: [
+            { role: "system", content: "你是群话术检索助手。给定查询词，输出 3-5 个同义/近义/相关表达，用于在话术库中召回。严格 JSON：{\"terms\": [\"词1\", \"词2\", \"词3\"]}。只输出 JSON，无任何解释。" },
+            { role: "user", content: `查询词：${trimmed}\n相关表达：` }
+          ],
+          temperature: 0.3,
+          max_tokens: 200,
+          response_format: { type: "json_object" }
+        })
+      });
+      if (!response.ok) {
+        console.warn(`[RAG Backend] expandQuery 失败 (HTTP ${response.status})，使用原 query`);
+        return [trimmed];
+      }
+      const data: any = await response.json();
+      const content = data.choices?.[0]?.message?.content || "";
+      try {
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed.terms) && parsed.terms.length > 0) {
+          const terms = parsed.terms
+            .filter((t: any) => typeof t === "string" && t.trim().length > 0)
+            .map((t: string) => t.trim())
+            .filter((t: string) => t !== trimmed)
+            .slice(0, 4);
+          if (terms.length > 0) return [trimmed, ...terms];
+        }
+      } catch {
+        const m = content.match(/"terms"\s*:\s*\[([^\]]+)\]/);
+        if (m) {
+          const terms = (m[1].match(/"([^"]+)"/g) || [])
+            .map(s => s.replace(/"/g, "").trim())
+            .filter((s: string) => s.length > 0 && s !== trimmed)
+            .slice(0, 4);
+          if (terms.length > 0) return [trimmed, ...terms];
+        }
+      }
+      return [trimmed];
+    } catch (err: any) {
+      console.warn(`[RAG Backend] expandQuery 异常，使用原 query: ${err.message}`);
+      return [trimmed];
+    }
+  }
+
+  // P1: 多 query 合并检索——每个扩展 query 独立打分，取 doc 的最高分
+  function multiQueryRetrieve(
+    docs: any[],
+    queryEmbeddings: number[][],
+    topK: number = 3,
+    minScore: number = 0.05
+  ): any[] {
+    const bestScore = new Map<string, { doc: any, score: number }>();
+    for (const d of docs) {
+      if (!d.embedding || !Array.isArray(d.embedding)) continue;
+      let maxScore = 0;
+      for (const qEmb of queryEmbeddings) {
+        const s = cosineSimilarity(qEmb, d.embedding);
+        if (s > maxScore) maxScore = s;
+      }
+      if (maxScore >= minScore) {
+        bestScore.set(d.id, { doc: d, score: maxScore });
+      }
+    }
+    return Array.from(bestScore.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(({ doc, score }) => ({
+        id: doc.id,
+        content: doc.content,
+        url: doc.url,
+        similarity: score
+      }));
+  }
+
   // 辅助工具：转换任意非 UUID 的字符串为哈希映射的唯一合法 UUID，保障 pgvector uuid 列匹配
   function toValidUuid(str: string): string {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -65,11 +191,12 @@ async function startServer() {
     return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`;
   }
 
-  // 1. Agnes AI 向量化计算辅助函数
+  // 1. Agnes AI 向量化计算辅助函数（P0: 失败时降级到本地伪 embedding）
   async function getAgnesEmbedding(text: string, apiKey: string): Promise<number[]> {
     const finalKey = apiKey || process.env.AGNES_API_KEY;
     if (!finalKey || finalKey.startsWith("MY_")) {
-      throw new Error("Agnes AI API key 未配置或无效，请设置 AGNES_API_KEY 或传入 customApiKey。");
+      console.warn("[RAG Backend] AGNES_API_KEY 未配置，降级到本地伪 embedding");
+      return localHashEmbedding(text);
     }
 
     try {
@@ -89,19 +216,19 @@ async function startServer() {
 
       if (!response.ok) {
         const errText = await response.text();
-        throw new Error(`[RAG Backend] Agnes AI Embeddings 请求失败 (${response.status}): ${errText}`);
+        throw new Error(`Agnes AI Embeddings 请求失败 (${response.status}): ${errText.slice(0, 200)}`);
       }
 
       const resData: any = await response.json();
       const values = resData.data?.[0]?.embedding;
-      if (!values || !Array.isArray(values)) {
+      if (!values || !Array.isArray(values) || values.length === 0) {
         throw new Error("未从 Agnes API 响应解析到有效向量。");
       }
 
       return values;
     } catch (err: any) {
-      console.error("[RAG Backend] Agnes Embedding 请求失败:", err);
-      throw err;
+      console.warn(`[RAG Backend] AGNES Embedding 失败，降级到本地伪 embedding: ${err.message}`);
+      return localHashEmbedding(text);
     }
   }
 
@@ -466,10 +593,15 @@ async function startServer() {
         } else {
         try {
           console.log(`[RAG Backend] 正在计算提问词 "${query}" 的 Embedding 向量 (Agnes Embeddings Model)`);
-          const queryEmbedding = await getAgnesEmbedding(query, resolvedApiKey);
+          // P1: 查询扩展 - 缓解伪向量在同义改写上的盲点
+          const expandedQueries = await expandQueryWithAgnes(query, resolvedApiKey);
+          const queryEmbeddings: number[][] = (
+            await Promise.all(expandedQueries.map((q: string) => getAgnesEmbedding(q, resolvedApiKey)))
+          ).filter((e: number[] | undefined): e is number[] => Array.isArray(e) && e.length > 0);
+          const queryEmbedding = queryEmbeddings[0]; // 兼容旧逻辑
 
-          if (queryEmbedding && Array.isArray(queryEmbedding)) {
-            console.log(`[RAG Backend] 正在进行 Supabase 多租户: "${finalUserId}" 且阶段: "${finalStage}" 独立 RAG 过滤与检索`);
+          if (queryEmbeddings.length > 0) {
+            console.log(`[RAG Backend] 正在进行 Supabase 多租户: "${finalUserId}" 且阶段: "${finalStage}" 独立 RAG 过滤与检索（${queryEmbeddings.length} 个 query 变体）`);
             const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
             
             // 优先尝试新型 DDL 函数 match_advisor_knowledge
@@ -523,26 +655,11 @@ async function startServer() {
                   return docStage === 'STAGE_SPEECH';
                 });
 
-                // 在 Node.js 服务端完成精准的余弦相似度计算与排序
-                const scoredDocs = filteredDocs
-                  .map((d: any) => {
-                    let score = 0;
-                    if (d.embedding && Array.isArray(d.embedding)) {
-                      score = cosineSimilarity(queryEmbedding, d.embedding);
-                    }
-                    return {
-                      id: d.id,
-                      content: d.content,
-                      url: d.url,
-                      similarity: score
-                    };
-                  })
-                  .filter((d: any) => d.similarity >= 0.05) // 相似度阈值宽容
-                  .sort((a, b) => b.similarity - a.similarity)
-                  .slice(0, 3); // top 3
+                // P1: 多 query 合并检索 - 取每个 doc 在所有扩展 query 下的最高分
+                const scoredDocs = multiQueryRetrieve(filteredDocs, queryEmbeddings, 3, 0.05);
 
                 cloudMemories = scoredDocs;
-                console.log(`[RAG Backend] 降级 Node.js 余弦相似度召回完成，命中数: ${cloudMemories.length}`);
+                console.log(`[RAG Backend] 降级 Node.js 余弦相似度召回完成（多 query 合并），命中数: ${cloudMemories.length}`);
               } else {
                 console.warn("[RAG Backend] 全表降级查询失败，尝试备用 match_documents RPC:", dbErr);
                 const { data: fbData, error: fbErr } = await supabase.rpc("match_documents", {
@@ -1158,9 +1275,14 @@ ${memoryContext}
       if (resolvedSupabaseUrl && resolvedSupabaseKey && resolvedSupabaseUrl !== "MY_SUPABASE_URL" && resolvedSupabaseKey !== "MY_SUPABASE_KEY") {
         try {
           // 利用调整后的动态 Query 嵌入进行搜索，提供完美的 RAG 变轨
-          const queryEmbedding = await getAgnesEmbedding(queryWords, resolvedApiKey);
+          // P1: 查询扩展 - 缓解伪向量在同义改写上的盲点
+          const expandedQueries = await expandQueryWithAgnes(queryWords, resolvedApiKey);
+          const queryEmbeddings: number[][] = (
+            await Promise.all(expandedQueries.map((q: string) => getAgnesEmbedding(q, resolvedApiKey)))
+          ).filter((e: number[] | undefined): e is number[] => Array.isArray(e) && e.length > 0);
+          const queryEmbedding = queryEmbeddings[0]; // 兼容旧逻辑
 
-          if (queryEmbedding && Array.isArray(queryEmbedding)) {
+          if (queryEmbeddings.length > 0) {
             const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
             
             // 优先采用最新 pgvector 函数 match_advisor_knowledge
@@ -1213,23 +1335,8 @@ ${memoryContext}
                   return docStage === 'STAGE_SPEECH';
                 });
 
-                // 在 Node.js 服务端完成精准的余弦相似度计算与排序
-                const scoredDocs = filteredDocs
-                  .map((d: any) => {
-                    let score = 0;
-                    if (d.embedding && Array.isArray(d.embedding)) {
-                      score = cosineSimilarity(queryEmbedding, d.embedding);
-                    }
-                    return {
-                      id: d.id,
-                      content: d.content,
-                      url: d.url,
-                      similarity: score
-                    };
-                  })
-                  .filter((d: any) => d.similarity >= 0.05)
-                  .sort((a, b) => b.similarity - a.similarity)
-                  .slice(0, 3);
+                // P1: 多 query 合并检索 - 取每个 doc 在所有扩展 query 下的最高分
+                const scoredDocs = multiQueryRetrieve(filteredDocs, queryEmbeddings, 3, 0.05);
 
                 cloudMemories = scoredDocs;
                 console.log(`[IM Recommendation] 降级 Node.js 向量过滤召回命中数: ${cloudMemories.length}`);
