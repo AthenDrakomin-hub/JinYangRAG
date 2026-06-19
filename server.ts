@@ -550,7 +550,7 @@ async function startServer() {
   // 2. Core Jin Yang RAG 路由
   app.post("/api/rag", async (req, res) => {
     try {
-      const { query, context, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
+      const { query, context, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, speech_count } = req.body;
 
       if (!query) {
         return res.status(400).json({ error: "用户提问(query)不可为空。" });
@@ -819,10 +819,11 @@ ${query}
         }
 
         // ====== v2.0 STAGE_SPEECH 第二步：多角色 Agent 编排生成 ======
-        // v2.2.9: 从 query 解析生成数量（如"生成 50 条"），默认 30 条
-        const countMatch = (query || '').match(/(\d+)\s*条/);
-        const requestedCount = countMatch ? parseInt(countMatch[1], 10) : 30;
-        const totalLines = Math.min(Math.max(requestedCount, 5), 80); // 单次上限 80 条 (max_tokens 16384 限制)
+        // v2.2.9.2: 直接读前端传的 speech_count 字段, 不解析 query 字符串
+        // 前端 sidepanel.js line 191: <input id="speech-count" type="range" min="3" max="20" value="8" step="1">
+        // 前端 line 611/634: const count = parseInt(countInput.value, 10) || 8;  speech_count: count
+        const requestedCount = parseInt(speech_count, 10) || 8;
+        const totalLines = Math.min(Math.max(requestedCount, 1), 20); // 跟随前端滑块上限 20
 
         // 抽取识别出的风格特征
         const sf = identifyJson.styleFeatures || {};
