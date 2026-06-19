@@ -693,6 +693,75 @@ function setupUIEventHandlers() {
     });
   }
 
+  // v2.1 上传业务文档到 Supabase（绕过 Google Drive OAuth）
+  const uploadDocBtn = document.getElementById("upload-doc-btn");
+  if (uploadDocBtn) {
+    uploadDocBtn.addEventListener("click", async () => {
+      const fileInput = document.getElementById("upload-doc-input");
+      const stageSelect = document.getElementById("upload-stage-select");
+      const statusEl = document.getElementById("upload-status");
+      const file = fileInput.files[0];
+      if (!file) {
+        statusEl.textContent = "⚠️ 请先选一个 .txt 或 .md 文件";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        statusEl.textContent = "⚠️ 文件太大（>5MB），请拆分后重试";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      uploadDocBtn.disabled = true;
+      uploadDocBtn.textContent = "上传中...";
+      statusEl.textContent = "⏳ 正在读取文件并计算 Embedding...";
+      statusEl.style.color = "var(--text-secondary)";
+      try {
+        const content = await file.text();
+        const settings = await getExtensionSettings();
+        const apiUrl = settings.apiUrl || defaultApiUrl;
+        const supabaseUrl = settings.supabaseUrl || localStorage.getItem(STORAGE_KEY_SUPABASE_URL);
+        const supabaseKey = settings.supabaseKey || localStorage.getItem(STORAGE_KEY_SUPABASE_KEY);
+        const userId = settings.userId || "system_sales_default";
+        const currentStage = stageSelect.value;
+
+        if (!supabaseUrl || !supabaseKey) {
+          statusEl.textContent = "❌ 请先在右上角齿轮 → 设置里填 Supabase URL + Key";
+          statusEl.style.color = "#ef4444";
+          return;
+        }
+
+        const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            supabaseUrl,
+            supabaseKey,
+            user_id: userId,
+            current_stage: currentStage
+          })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          statusEl.textContent = `❌ 失败：${data.error || "未知错误"}`;
+          statusEl.style.color = "#ef4444";
+          return;
+        }
+        statusEl.textContent = `✅ 已上传：${file.name} → ${currentStage}（标签：${(data.tags || []).join(", ") || "无"}）`;
+        statusEl.style.color = "#10b981";
+        fileInput.value = "";
+        await fetchCloudMemories();
+      } catch (e) {
+        statusEl.textContent = `❌ 错误：${e.message}`;
+        statusEl.style.color = "#ef4444";
+      } finally {
+        uploadDocBtn.disabled = false;
+        uploadDocBtn.textContent = "上传到 Supabase";
+      }
+    });
+  }
+
   // 清空对话
   const clearChatBtn = document.getElementById("clear-chat-btn");
   clearChatBtn.addEventListener("click", () => {

@@ -180,7 +180,22 @@
         <button id="open-drive-picker-btn" class="btn-primary">从 Drive 导入</button>
         <button id="clear-memory-btn" class="btn-secondary">清空记忆库</button>
       </div>
-      <div id="drive-status" class="panel-description" style="font-size:11px; color:#9ca3af; margin-top:4px;">Google Drive 未连接。</div>
+      <div id="drive-status" class="panel-description" style="font-size:11px; color:#9ca3af; margin-top:4px;">Google Drive 未连接（可忽略，建议用下方直接上传到 Supabase）。</div>
+
+      <!-- 上传业务文档到 Supabase（v2.1 新增，绕过 Google Drive OAuth） -->
+      <div style="margin-top: 12px; padding: 10px; background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-sm);">
+        <div class="panel-description" style="margin-bottom: 8px; font-size: 11px;">📤 <strong>上传业务文档到 Supabase</strong>（让销冠 4 stage / v2.0 话术基于真实业务流程记忆）</div>
+        <select id="upload-stage-select" class="settings-input" style="font-size: 11px; padding: 4px 6px; margin-bottom: 6px;">
+          <option value="STAGE_1_RECEIVE">STAGE_1_RECEIVE · 接待准备相识</option>
+          <option value="STAGE_2_GROUP">STAGE_2_GROUP · 社群互动探需</option>
+          <option value="STAGE_3_ACTIVATE">STAGE_3_ACTIVATE · 私聊跟进邀约</option>
+          <option value="STAGE_4_OPEN">STAGE_4_OPEN · 临门成交收定</option>
+          <option value="STAGE_SPEECH" selected>STAGE_SPEECH · 群活跃话术（v2.0）</option>
+        </select>
+        <input type="file" id="upload-doc-input" accept=".txt,.md,.markdown" style="font-size: 11px; margin-bottom: 6px; width: 100%;" />
+        <button id="upload-doc-btn" class="btn-primary" style="width: 100%; font-size: 12px;">上传到 Supabase</button>
+        <div id="upload-status" class="panel-description" style="font-size: 11px; color: var(--text-secondary); margin-top: 6px; min-height: 14px;"></div>
+      </div>
       <div class="memory-list" id="memory-list"></div>
       <div class="panel-empty hidden" id="memory-empty">当前记忆库为空。请先提问并保存问答内容。</div>
     </div>

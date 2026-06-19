@@ -312,8 +312,13 @@ async function startServer() {
                 // 严格进行租户隔离和阶段隔离
                 const filteredDocs = dbDocs.filter((d: any) => {
                   const docUserId = toValidUuid(d.user_id || "system_sales_default");
-                  const docStage = d.current_stage || finalStage;
-                  return docUserId === finalUserId && docStage === finalStage;
+                  const docStage = d.current_stage;
+                  // 销冠 4 stage：user_id 隔离 + stage 严格匹配（行为不变）
+                  if (finalStage !== 'STAGE_SPEECH') {
+                    return docUserId === finalUserId && docStage === finalStage;
+                  }
+                  // STAGE_SPEECH：业务话术共享，不做 user_id 隔离，只按 stage 过滤
+                  return docStage === 'STAGE_SPEECH';
                 });
 
                 // 在 Node.js 服务端完成精准的余弦相似度计算与排序
@@ -978,8 +983,13 @@ ${memoryContext}
                 // 严格进行租户隔离和阶段隔离
                 const filteredDocs = dbDocs.filter((d: any) => {
                   const docUserId = toValidUuid(d.user_id || "system_sales_default");
-                  const docStage = d.current_stage || finalStage;
-                  return docUserId === finalUserId && docStage === finalStage;
+                  const docStage = d.current_stage;
+                  // 销冠 4 stage：user_id 隔离 + stage 严格匹配（行为不变）
+                  if (finalStage !== 'STAGE_SPEECH') {
+                    return docUserId === finalUserId && docStage === finalStage;
+                  }
+                  // STAGE_SPEECH：业务话术共享，不做 user_id 隔离，只按 stage 过滤
+                  return docStage === 'STAGE_SPEECH';
                 });
 
                 // 在 Node.js 服务端完成精准的余弦相似度计算与排序
