@@ -110,7 +110,8 @@ async function startServer() {
     messages: any[],
     temperature: number,
     responseFormatJson?: boolean,
-    customApiKey?: string
+    customApiKey?: string,
+    maxTokens?: number
   ): Promise<string> {
     const finalKey = customApiKey || process.env.AGNES_API_KEY;
     if (!finalKey || finalKey.startsWith("MY_")) {
@@ -122,7 +123,8 @@ async function startServer() {
       const payload: any = {
         model: AGNES_CHAT_MODEL,
         messages: messages,
-        temperature: temperature || 0.3
+        temperature: temperature || 0.3,
+        max_tokens: maxTokens || 4096
       };
       if (responseFormatJson) {
         payload.response_format = { type: "json_object" };
@@ -509,9 +511,10 @@ ${memoryContext}
 【主需求】
 ${query}
 
-【硬性输出要求】
-1. 严格输出 **一个** JSON 块，不要输出 JSON 外的任何文字
-2. JSON 字段：
+【硬性输出要求 - 必须严格遵守】
+1. **纯 JSON 输出**：除了 JSON 本身，不输出任何其他文字、解释、注释、围栏符号
+2. **不要用 markdown 围栏**（不要 三个反引号 json 包裹），直接以 { 开头 } 结尾
+3. JSON 字段（字段名严格用以下英文，禁止中文 key）：
    {
      "scenarios": [ { "name": "...", "trigger": "...", "timing": "..." } ],
      "roles": [ { "name": "...", "trait": "...", "voice": "...", "bestTiming": "..." } ],
@@ -519,8 +522,9 @@ ${query}
      "forbidden": [ "禁词1", "禁词2" ],
      "caseSnippets": [ "优秀样板 1", "优秀样板 2" ]
    }
-3. 每个数组至少 2 个元素；如果文档中找不到，明确标 null
-4. JSON 块格式严格：用 \`\`\`json 和 \`\`\` 包裹，便于解析`;
+4. 每个数组至少 2 个元素；找不到就留空数组 []
+5. **禁止**：多逗号、缺引号、未闭合、嵌套未闭合、注释、单引号、裸换行字符串
+6. 如果文档中找不到某个字段，直接用空数组 [] 代替，绝不输出 null`;
 
         const identifyMessages = [
           { role: "system", content: identifySystemInstruction },
@@ -529,21 +533,46 @@ ${query}
 
         let identifyText = "";
         try {
-          identifyText = await callAgnesChat(identifyMessages, 0.4, true, resolvedApiKey);
+          identifyText = await callAgnesChat(identifyMessages, 0.4, true, resolvedApiKey, 4096);
+          console.log(`[RAG Backend] 识别原始输出 (前 200 字): ${identifyText.substring(0, 200).replace(/\n/g, " ")}`);
         } catch (e) {
           console.error("[RAG Backend] STAGE_SPEECH 第一步识别失败:", e);
           identifyText = "";
         }
 
-        // 解析识别 JSON（容错：可能含 ```json 围栏或纯 JSON）
+        // 解析识别 JSON（多层容错：先尝试严格 JSON.parse，再尝试 markdown 围栏抽取，再尝试大括号平衡匹配 + 截断修复）
         let identifyJson = { scenarios: [], roles: [], rhythm: { totalLines: 0, order: [] }, forbidden: [], caseSnippets: [] };
-        try {
-          const jsonMatch = identifyText.match(/```json\s*([\s\S]+?)\s*```/) || identifyText.match(/(\{[\s\S]+?\})/);
-          const jsonStr = jsonMatch ? jsonMatch[1] : identifyText;
-          const parsed = JSON.parse(jsonStr);
+        const safeParseJson = (text: string): any | null => {
+          if (!text || !text.trim()) return null;
+          // 1. 直接尝试
+          try { return JSON.parse(text); } catch {}
+          // 2. 抽取 三个反引号 json 围栏
+          const fenceMatch = text.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+          if (fenceMatch) { try { return JSON.parse(fenceMatch[1]); } catch {} }
+          // 3. 大括号平衡匹配：找最外层 {...}
+          const start = text.indexOf("{");
+          if (start < 0) return null;
+          let depth = 0, inStr = false, esc = false, end = -1;
+          for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (esc) { esc = false; continue; }
+            if (ch === "\\") { esc = true; continue; }
+            if (ch === "\"") { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (ch === "{") depth++;
+            else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+          }
+          if (end < 0) return null;
+          const candidate = text.substring(start, end + 1);
+          try { return JSON.parse(candidate); } catch {}
+          return null;
+        };
+        const parsed = safeParseJson(identifyText);
+        if (parsed) {
           identifyJson = Object.assign(identifyJson, parsed);
-        } catch (e) {
-          console.warn("[RAG Backend] 识别 JSON 解析失败，使用空骨架:", e && e.message);
+          console.log(`[RAG Backend] 识别 JSON 解析成功: scenarios=${(parsed.scenarios||[]).length} roles=${(parsed.roles||[]).length} forbidden=${(parsed.forbidden||[]).length} cases=${(parsed.caseSnippets||[]).length} rhythm=${(parsed.rhythm&&parsed.rhythm.totalLines)||0}`);
+        } else {
+          console.warn(`[RAG Backend] 识别 JSON 解析失败，使用空骨架. 原始输出 (前 300): ${identifyText.substring(0, 300).replace(/\n/g, " ")}`);
         }
 
         // ====== v2.0 STAGE_SPEECH 第二步：多角色 Agent 编排生成 ======
@@ -1201,7 +1230,7 @@ ${memoryContext}
 
       let responseText = await callAgnesChat(messages, 0.35, true, resolvedApiKey);
       // 清洗可能存在的 markdown wrapping
-      responseText = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
+      responseText = responseText.replace(/三个反引号 json/gi, "").replace(/```/g, "").trim();
 
       let decisionData: any = {};
       try {
