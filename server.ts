@@ -801,10 +801,10 @@ ${query}
 
         // ====== v2.0 STAGE_SPEECH 第二步：多角色 Agent 编排生成 ======
         // v2.2.9.2: 直接读前端传的 speech_count 字段, 不解析 query 字符串
-        // 前端 sidepanel.js line 191: <input id="speech-count" type="range" min="3" max="20" value="8" step="1">
+        // 前端 sidepanel.js line 172: <input id="speech-count" type="range" min="3" max="200" value="8" step="1">
         // 前端 line 611/634: const count = parseInt(countInput.value, 10) || 8;  speech_count: count
         const requestedCount = parseInt(speech_count, 10) || 8;
-        const totalLines = Math.min(Math.max(requestedCount, 1), 20); // 跟随前端滑块上限 20
+        const totalLines = Math.min(Math.max(requestedCount, 1), 200); // v2.2.9.5: 上限 200
 
         // 抽取识别出的风格特征
         const sf = identifyJson.styleFeatures || {};
