@@ -3,8 +3,17 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import ws from "ws";
 
 dotenv.config();
+
+// 修 Node 20 + @supabase/supabase-js v2 的 WebSocket 缺失问题
+// 详见 https://github.com/supabase/realtime-js/issues/303
+// 所有 createClient 调用统一走这个 helper，传 realtime.transport = ws
+const supabaseTransport = (process.env.SUPABASE_TRANSPORT_DISABLE === '1') ? undefined : ws;
+function createSupabaseClient(url: string, key: string) {
+  return createClient(url, key, supabaseTransport ? { realtime: { transport: supabaseTransport } } : {});
+}
 
 async function startServer() {
   const app = express();
@@ -198,7 +207,7 @@ async function startServer() {
       return res.status(500).json({ error: "SUPABASE_URL/KEY 缺失", url, key: key ? "(set)" : "(missing)" });
     }
     try {
-      const supabase = createClient(url, key);
+      const supabase = createSupabaseClient(url, key);
       const t1 = Date.now();
       const { data, error } = await supabase
         .from("documents")
@@ -326,7 +335,7 @@ async function startServer() {
         if (finalStage === 'STAGE_SPEECH') {
           try {
             console.log(`[RAG Backend] STAGE_SPEECH 走业务文档直查模式（不依赖 Embedding）`);
-            const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+            const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
             const { data: speechDocs, error: speechErr } = await supabase
               .from("documents")
               .select("id, content, url, current_stage")
@@ -355,7 +364,7 @@ async function startServer() {
 
           if (queryEmbedding && Array.isArray(queryEmbedding)) {
             console.log(`[RAG Backend] 正在进行 Supabase 多租户: "${finalUserId}" 且阶段: "${finalStage}" 独立 RAG 过滤与检索`);
-            const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+            const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
             
             // 优先尝试新型 DDL 函数 match_advisor_knowledge
             const { data: rpcData, error: rpcErr } = await supabase.rpc("match_advisor_knowledge", {
@@ -721,7 +730,7 @@ ${memoryContext}
       
       const embeddingValues = await getAgnesEmbedding(taggedContent, resolvedApiKey);
 
-      const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
       const insertPayload: any = {
         content: taggedContent,
         embedding: embeddingValues,
@@ -860,7 +869,7 @@ ${memoryContext}
         return res.status(400).json({ error: "因为文本内容过短或无法满足切片标准，此文件未能进行导入。" });
       }
 
-      const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
       let successCount = 0;
 
       // 3. 对各个分块执行 embedding 生成并插入数据库
@@ -1028,7 +1037,7 @@ ${memoryContext}
           const queryEmbedding = await getAgnesEmbedding(queryWords, resolvedApiKey);
 
           if (queryEmbedding && Array.isArray(queryEmbedding)) {
-            const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+            const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
             
             // 优先采用最新 pgvector 函数 match_advisor_knowledge
             const { data: rpcData, error: rpcErr } = await supabase.rpc("match_advisor_knowledge", {
@@ -1247,7 +1256,7 @@ ${memoryContext}
         return res.status(400).json({ error: "未配置 Supabase 信息。请先填参连接。" });
       }
 
-      const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
       // v2.2: 按需选择字段，有 stage 时只查必要列
       let query = supabase.from("documents").select("id, content, url, created_at, current_stage");
 
@@ -1286,7 +1295,7 @@ ${memoryContext}
         return res.status(400).json({ error: "未配置 Supabase 信息。" });
       }
 
-      const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
       const { error } = await supabase.from("documents").delete().eq("id", id);
 
       if (error) {
@@ -1318,7 +1327,7 @@ ${memoryContext}
         });
       }
 
-      const supabase = createClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
       
       // 1. 获取计数
       const { count, error: countError } = await supabase
