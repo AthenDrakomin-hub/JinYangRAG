@@ -850,6 +850,7 @@ function renderMemories() {
 
   empty.classList.add("hidden");
   mergedMemories.forEach((memory) => {
+    const isCloud = memory.source === "Supabase";
     const card = document.createElement("div");
     card.className = "memory-card";
     card.innerHTML = `
@@ -858,7 +859,10 @@ function renderMemories() {
           <div class="memory-title">${memory.title}</div>
           <div class="memory-meta">${new Date(memory.createdAt).toLocaleString()}</div>
         </div>
-        <button class="btn-secondary memory-toggle-btn" data-id="${memory.id}">详情</button>
+        <div class="memory-card-actions">
+          <button class="btn-secondary memory-toggle-btn" data-id="${memory.id}">详情</button>
+          <button class="btn-danger memory-delete-btn" data-id="${memory.id}" data-cloud="${isCloud ? "1" : "0"}" title="删除该条记忆">删除</button>
+        </div>
       </div>
       <div class="memory-content hidden">${formatMarkdown(memory.snippet)}</div>
       <div class="memory-source">来源：${memory.source || "当前网页"}</div>
@@ -872,7 +876,47 @@ function renderMemories() {
         toggleBtn.textContent = expanded ? "详情" : "收起";
       });
     }
+    // v2.2.9.4: 单条删除按钮
+    const deleteBtn = card.querySelector(".memory-delete-btn");
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", async () => {
+        const ok = window.confirm("确定删除「" + memory.title + "」？\n来源：" + (memory.source || "当前网页"));
+        if (!ok) return;
+        await deleteMemory(memory.id, isCloud);
+      });
+    }
   });
+}
+
+// v2.2.9.4: 单条删除（云端走 /api/memory/delete，本地直接剔除）
+async function deleteMemory(memoryId, isCloud) {
+  try {
+    if (isCloud) {
+      const settings = await getExtensionSettings();
+      const apiUrl = settings.apiUrl || defaultApiUrl;
+      const endpoint = buildBackendEndpoint(apiUrl, "api/memory/delete");
+      const resp = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: memoryId })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.error) {
+        alert("删除失败：" + (data.error || resp.status));
+        return;
+      }
+      cloudMemoryItems = cloudMemoryItems.filter((m) => m.id !== memoryId);
+      alert("已从云端删除");
+    } else {
+      memoryItems = memoryItems.filter((m) => m.id !== memoryId);
+      saveExtensionState();
+      alert("已从本地删除");
+    }
+    renderMemories();
+  } catch (err) {
+    console.error("[deleteMemory] 失败：", err);
+    alert("删除出错：" + (err.message || err));
+  }
 }
 
 function persistSession(query, answer) {

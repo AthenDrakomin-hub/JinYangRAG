@@ -243,6 +243,33 @@ header {
   gap: 8px;
   margin-bottom: 8px;
 }
+.memory-card-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #dc2626;
+}
+
+.btn-danger:active {
+  transform: scale(0.97);
+}
+
 
 .session-title,
 .memory-title {
