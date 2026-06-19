@@ -262,6 +262,11 @@ async function startServer() {
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
 
       if (resolvedSupabaseUrl && resolvedSupabaseKey && resolvedSupabaseUrl !== "MY_SUPABASE_URL" && resolvedSupabaseKey !== "MY_SUPABASE_KEY") {
+        // v2.2.0-debug: 把容器内 SUPABASE 配置的 prefix 打出来（不打印完整 key）
+        const urlPrefix = resolvedSupabaseUrl.substring(0, 35);
+        const keyPrefix = resolvedSupabaseKey.substring(0, 12);
+        const keySuffix = resolvedSupabaseKey.substring(resolvedSupabaseKey.length - 4);
+        console.log(`[RAG Backend] ENV 诊断: url=${urlPrefix}... key=${keyPrefix}...${keySuffix} (len=${resolvedSupabaseKey.length})`);
         // v2.1 STAGE_SPEECH 优先走"拉全表 stage 文档"模式（不依赖 Embedding 相似度）
         // 因为 v2.0 STAGE_SPEECH 的核心是 prompt 编排，相似度排序意义不大
         // 业务文档量小（< 50 条），全表拉后丢给识别 agent 即可
@@ -283,9 +288,9 @@ async function startServer() {
                 url: d.url || "",
                 similarity: 0.8
               }));
-              console.log(`[RAG Backend] STAGE_SPEECH 直查命中 ${cloudMemories.length} 条业务文档`);
+              console.log(`[RAG Backend] STAGE_SPEECH 直查命中 ${cloudMemories.length} 条业务文档, ids=${cloudMemories.map(d=>d.id.substring(0,8)).join(",")}`);
             } else {
-              console.warn("[RAG Backend] STAGE_SPEECH 直查无数据返回");
+              console.warn("[RAG Backend] STAGE_SPEECH 直查无数据返回 (data is null/undefined)");
             }
           } catch (speechErr: any) {
             console.error("[RAG Backend] STAGE_SPEECH 直查异常:", speechErr);
