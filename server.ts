@@ -550,7 +550,7 @@ async function startServer() {
   // 2. Core Jin Yang RAG 路由
   app.post("/api/rag", async (req, res) => {
     try {
-      const { query, context, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, speech_count } = req.body;
+      const { query, context, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, target, speech_count } = req.body;
 
       if (!query) {
         return res.status(400).json({ error: "用户提问(query)不可为空。" });
@@ -559,6 +559,9 @@ async function startServer() {
       const finalUserId = toValidUuid(user_id || "system_sales_default");
       // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
       const finalStage = current_stage || "DEFAULT";
+      // v2.3.1: 业务目标分流 - target='qa' 走 Embedding 相似度路径，target='speech' 走 STAGE_SPEECH 直查
+      // 老数据兼容：未传 target 时按 current_stage 自动归类
+      const finalTarget = target || (finalStage === "STAGE_SPEECH" ? "speech" : "qa");
 
       // 智能安全加载：支持从环境变量或自定义密钥端获取认证密钥
       const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
@@ -582,15 +585,30 @@ async function startServer() {
         // v2.1 STAGE_SPEECH 优先走"拉全表 stage 文档"模式（不依赖 Embedding 相似度）
         // 因为 v2.0 STAGE_SPEECH 的核心是 prompt 编排，相似度排序意义不大
         // 业务文档量小（< 50 条），全表拉后丢给识别 agent 即可
-        if (finalStage === 'STAGE_SPEECH') {
+        if (finalStage === 'STAGE_SPEECH' || finalTarget === 'speech') {
           try {
-            console.log(`[RAG Backend] STAGE_SPEECH 走业务文档直查模式（不依赖 Embedding）`);
+            console.log(`[RAG Backend] STAGE_SPEECH/target=speech 走业务文档直查模式（不依赖 Embedding）`);
             const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
-            const { data: speechDocs, error: speechErr } = await supabase
+            // v2.3.1: 按 target='speech' 过滤（替代/并存 current_stage 过滤）
+            let speechDocs: any[] | null = null;
+            let speechErr: any = null;
+            const firstQuery = await supabase
               .from("documents")
-              .select("id, content, url, current_stage")
-              .eq("current_stage", "STAGE_SPEECH")
+              .select("id, content, url, current_stage, target")
+              .eq("target", "speech")
               .limit(10);
+            speechDocs = firstQuery.data;
+            speechErr = firstQuery.error;
+            if (speechErr && (speechErr.message.includes("target") || speechErr.message.includes("column"))) {
+              console.warn("[RAG Backend] Documents 表缺少 'target' 字段，自动降级按 current_stage 过滤...");
+              const fallback = await supabase
+                .from("documents")
+                .select("id, content, url, current_stage")
+                .eq("current_stage", "STAGE_SPEECH")
+                .limit(10);
+              speechDocs = fallback.data as any[] | null;
+              speechErr = fallback.error;
+            }
             if (speechErr) {
               console.error("[RAG Backend] STAGE_SPEECH 直查 SQL 错:", speechErr);
             } else if (speechDocs && Array.isArray(speechDocs)) {
@@ -643,15 +661,25 @@ async function startServer() {
               let dbDocs: any[] | null = null;
               let dbErr: any = null;
 
+              // v2.3.1: 加 target 字段，过滤 target='qa'（智能问答业务知识库）
               const firstTry = await supabase
                 .from("documents")
-                .select("id, content, url, embedding, user_id, current_stage");
+                .select("id, content, url, embedding, user_id, current_stage, target")
+                .eq("target", "qa");
 
-              if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
+              if (firstTry.error && (firstTry.error.message.includes("target") || firstTry.error.message.includes("column"))) {
+                console.warn("[RAG Backend] Documents 表缺少 'target' 字段，自动降级去除 target 过滤 + 选择列...");
+                const secondTry = await supabase
+                  .from("documents")
+                  .select("id, content, url, embedding, user_id, current_stage");
+                dbDocs = secondTry.data;
+                dbErr = secondTry.error;
+              } else if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
                 console.warn("[RAG Backend] Documents 表缺少 'current_stage' 字段，自动降级去除非此列选择...");
                 const secondTry = await supabase
                   .from("documents")
-                  .select("id, content, url, embedding, user_id");
+                  .select("id, content, url, embedding, user_id, target")
+                  .eq("target", "qa");
                 dbDocs = secondTry.data;
                 dbErr = secondTry.error;
               } else {
@@ -661,6 +689,7 @@ async function startServer() {
 
               if (!dbErr && dbDocs && Array.isArray(dbDocs)) {
                 // v2.3.0: 销冠业务走统一池（user_id 隔离即可，不再按 stage 过滤）
+                // v2.3.1: 上层已按 target='qa' 过滤，此处只按 user_id 隔离
                 const filteredDocs = dbDocs.filter((d: any) => {
                   const docUserId = toValidUuid(d.user_id || "system_sales_default");
                   return docUserId === finalUserId;
@@ -977,7 +1006,7 @@ ${memoryContext}
   // 3. 固化存储文本片段到 Supabase vector 长期记忆中
   app.post("/api/memory/save", async (req, res) => {
     try {
-      const { content, url, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
+      const { content, url, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, target } = req.body;
 
       if (!content) {
         return res.status(400).json({ error: "要存储的内容(content)不可为空。" });
@@ -986,6 +1015,8 @@ ${memoryContext}
       const finalUserId = toValidUuid(user_id || "system_sales_default");
       // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
       const finalStage = current_stage || "DEFAULT";
+      // v2.3.1: 业务目标分类，默认 'speech'（兼容老数据/话术 tab 上传），智能问答 tab 显式传 'qa'
+      const finalTarget = target || (finalStage === "STAGE_SPEECH" ? "speech" : "qa");
 
       // 提取核心关键词/标签，提高 Manage Memory 表格等页面的过滤及搜索精度
       const autoTags = extractKeywords(content);
@@ -1027,14 +1058,34 @@ ${memoryContext}
         .from("documents")
         .insert({
           ...insertPayload,
-          current_stage: finalStage
+          current_stage: finalStage,
+          target: finalTarget
         });
 
-      if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+      if (dbErr && (dbErr.message.includes("target") || dbErr.message.includes("column"))) {
+        console.warn("[Memory Save] Documents 表中缺失 'target' 列，自动降级不包含该列进行二次插入...");
+        const retry1 = await supabase
+          .from("documents")
+          .insert({
+            ...insertPayload,
+            current_stage: finalStage
+          });
+        dbErr = retry1.error;
+        if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+          console.warn("[Memory Save] Documents 表中缺失 'current_stage' 列，自动降级去除该列...");
+          const retry2 = await supabase
+            .from("documents")
+            .insert(insertPayload);
+          dbErr = retry2.error;
+        }
+      } else if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
         console.warn("[Memory Save] Documents 表中缺失 'current_stage' 列，自动降级不包含该列进行二次插入...");
         const retryResult = await supabase
           .from("documents")
-          .insert(insertPayload);
+          .insert({
+            ...insertPayload,
+            target: finalTarget
+          });
         dbErr = retryResult.error;
       }
 
@@ -1052,7 +1103,7 @@ ${memoryContext}
   // 3.0. 允许点击按钮唤起 Google Picker，并在后端分片存入 Supabase 的长期记忆库
   app.post("/api/drive/import", async (req, res) => {
     try {
-      const { fileId, fileName, mimeType, accessToken, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
+      const { fileId, fileName, mimeType, accessToken, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, target } = req.body;
 
       if (!fileId || !accessToken) {
         return res.status(400).json({ error: "Google 资源定位符(fileId) 与验证票据(accessToken) 不能为空。" });
@@ -1061,6 +1112,8 @@ ${memoryContext}
       const finalUserId = toValidUuid(user_id || "system_sales_default");
       // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
       const finalStage = current_stage || "DEFAULT";
+      // v2.3.1: 业务目标分类
+      const finalTarget = target || (finalStage === "STAGE_SPEECH" ? "speech" : "qa");
 
       const resolvedApiKey = customApiKey || process.env.AGNES_API_KEY;
       if (!resolvedApiKey || resolvedApiKey === "MY_AGNES_API_KEY") {
@@ -1180,14 +1233,34 @@ ${memoryContext}
               .from("documents")
               .insert({
                 ...insertPayload,
-                current_stage: finalStage
+                current_stage: finalStage,
+                target: finalTarget
               });
 
-            if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+            if (dbErr && (dbErr.message.includes("target") || dbErr.message.includes("column"))) {
+              console.warn("[Drive Import] Documents 表中缺失 'target' 列，自动降级去除 target 插入...");
+              const retry1 = await supabase
+                .from("documents")
+                .insert({
+                  ...insertPayload,
+                  current_stage: finalStage
+                });
+              dbErr = retry1.error;
+              if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
+                console.warn("[Drive Import] Documents 表中缺失 'current_stage' 列，自动降级去除该列插入...");
+                const retry2 = await supabase
+                  .from("documents")
+                  .insert(insertPayload);
+                dbErr = retry2.error;
+              }
+            } else if (dbErr && (dbErr.message.includes("current_stage") || dbErr.message.includes("column"))) {
               console.warn("[Drive Import] Documents 表中缺失 'current_stage' 列，自动降级去除非此列插入...");
               const retryResult = await supabase
                 .from("documents")
-                .insert(insertPayload);
+                .insert({
+                  ...insertPayload,
+                  target: finalTarget
+                });
               dbErr = retryResult.error;
             }
 
@@ -1245,7 +1318,7 @@ ${memoryContext}
   // 3.0b. 智能话术推荐 API：“销冠思维引擎”重构专版版
   app.post("/api/im/recommend", async (req, res) => {
     try {
-      const { chatHistory, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage } = req.body;
+      const { chatHistory, customApiKey, supabaseUrl, supabaseKey, user_id, current_stage, target } = req.body;
 
       if (!chatHistory || !Array.isArray(chatHistory) || chatHistory.length === 0) {
         return res.status(400).json({ error: "聊天记录(chatHistory) 不能为空且必须为数组。" });
@@ -1254,6 +1327,8 @@ ${memoryContext}
       const finalUserId = toValidUuid(user_id || "system_sales_default");
       // v2.3.0: STAGE_1-4 已删除，默认走 DEFAULT（统一销冠 prompt）
       const finalStage = current_stage || "DEFAULT";
+      // v2.3.1: 业务目标分类 - /api/im/recommend 是销冠思维引擎，走 target='qa'
+      const finalTarget = target || (finalStage === "STAGE_SPEECH" ? "speech" : "qa");
 
       // Helper function to clean text: remove system tags, timestamps and emojis
       const filterMsgText = (txt: string): string => {
@@ -1351,15 +1426,25 @@ ${memoryContext}
               let dbDocs: any[] | null = null;
               let dbErr: any = null;
 
+              // v2.3.1: 加 target 字段 + target='qa' 过滤（销冠思维引擎只看业务知识库）
               const firstTry = await supabase
                 .from("documents")
-                .select("id, content, url, embedding, user_id, current_stage");
+                .select("id, content, url, embedding, user_id, current_stage, target")
+                .eq("target", "qa");
 
-              if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
+              if (firstTry.error && (firstTry.error.message.includes("target") || firstTry.error.message.includes("column"))) {
+                console.warn("[IM Recommendation] Documents 表缺少 'target' 字段，自动降级去除 target 过滤 + 选择列...");
+                const secondTry = await supabase
+                  .from("documents")
+                  .select("id, content, url, embedding, user_id, current_stage");
+                dbDocs = secondTry.data;
+                dbErr = secondTry.error;
+              } else if (firstTry.error && (firstTry.error.message.includes("current_stage") || firstTry.error.message.includes("column"))) {
                 console.warn("[IM Recommendation] Documents 表缺少 'current_stage' 字段，自动降级去除非此列选择...");
                 const secondTry = await supabase
                   .from("documents")
-                  .select("id, content, url, embedding, user_id");
+                  .select("id, content, url, embedding, user_id, target")
+                  .eq("target", "qa");
                 dbDocs = secondTry.data;
                 dbErr = secondTry.error;
               } else {
@@ -1504,7 +1589,7 @@ ${memoryContext}
   // v2.2: 新增 stage 过滤参数，让前端能按业务 stage 查文档（不再直调 Supabase REST）
   app.post("/api/memory/list", async (req, res) => {
     try {
-      const { supabaseUrl, supabaseKey, searchQuery, stage } = req.body;
+      const { supabaseUrl, supabaseKey, searchQuery, stage, target } = req.body;
       const resolvedSupabaseUrl = supabaseUrl || process.env.SUPABASE_URL;
       const resolvedSupabaseKey = supabaseKey || process.env.SUPABASE_KEY;
 
@@ -1513,10 +1598,15 @@ ${memoryContext}
       }
 
       const supabase = createSupabaseClient(resolvedSupabaseUrl, resolvedSupabaseKey);
+      // v2.3.1: 加 target 字段；target 与 stage 互斥（target 优先），都传时取 target
       // v2.2: 按需选择字段，有 stage 时只查必要列
-      let query = supabase.from("documents").select("id, content, url, created_at, current_stage");
+      let query = supabase.from("documents").select("id, content, url, created_at, current_stage, target");
 
-      if (stage && stage.trim() !== "") {
+      if (target && target.trim() !== "") {
+        // v2.3.1: target 优先
+        query = query.eq("target", target.trim());
+      } else if (stage && stage.trim() !== "") {
+        // 向后兼容：未传 target 时按 stage 过滤
         query = query.eq("current_stage", stage.trim());
       }
 
@@ -1524,7 +1614,25 @@ ${memoryContext}
         query = query.ilike("content", `%${searchQuery.trim()}%`);
       }
 
-      const { data, error } = await query.order("created_at", { ascending: false }).limit(100);
+      // v2.3.1: target 列缺失降级（如果 target 过滤失败，自动 retry 去除 target 过滤）
+      let data: any = null;
+      let error: any = null;
+      const result = await query.order("created_at", { ascending: false }).limit(100);
+      data = result.data;
+      error = result.error;
+      if (error && target && target.trim() !== "" && (error.message.includes("target") || error.message.includes("column"))) {
+        console.warn("[Memory List] Documents 表缺少 'target' 字段，自动降级去除 target 过滤...");
+        let retryQuery = supabase.from("documents").select("id, content, url, created_at, current_stage");
+        if (stage && stage.trim() !== "") {
+          retryQuery = retryQuery.eq("current_stage", stage.trim());
+        }
+        if (searchQuery && searchQuery.trim() !== "") {
+          retryQuery = retryQuery.ilike("content", `%${searchQuery.trim()}%`);
+        }
+        const retry = await retryQuery.order("created_at", { ascending: false }).limit(100);
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         return res.status(500).json({ error: `Supabase 读取失败: ${error.message}` });

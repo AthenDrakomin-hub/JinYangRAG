@@ -451,6 +451,7 @@ async function fetchCloudMemories() {
         title: item.url || `Supabase 记忆 ${new Date(item.created_at || item.createdAt || Date.now()).toLocaleString()}`,
         snippet: item.content ? String(item.content).slice(0, 140) : "(无内容摘要)",
         source: "Supabase",
+        target: item.target || "",  // v2.3.1: 透传 target 字段
         createdAt: item.created_at || item.createdAt || new Date().toISOString()
       }));
     } else {
@@ -700,7 +701,9 @@ async function importDriveFile(file) {
       supabaseUrl,
       supabaseKey,
       user_id: userId,
-      current_stage: currentStage
+      current_stage: currentStage,
+      // v2.3.1: 业务目标 hardcode qa（销冠业务文档，弹窗里只走这条）
+      target: "qa"
     })
   });
 
@@ -788,10 +791,17 @@ function renderMemories() {
   mergedMemories.forEach((memory) => {
     const card = document.createElement("div");
     card.className = "memory-card";
+    // v2.3.1: 业务目标 badge — qa 绿色（业务知识），speech 紫色（群运营文档）
+    const rawTarget = (memory.target || "").toString().toLowerCase();
+    const targetBadge = rawTarget === "qa"
+      ? '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#10b981; color:#fff; margin-right:6px; vertical-align:middle;">📚 业务知识</span>'
+      : rawTarget === "speech"
+        ? '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#8b5cf6; color:#fff; margin-right:6px; vertical-align:middle;">🎭 群运营文档</span>'
+        : '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#6b7280; color:#fff; margin-right:6px; vertical-align:middle;">未知</span>';
     card.innerHTML = `
       <div class="memory-card-header">
         <div>
-          <div class="memory-title">${memory.title}</div>
+          <div class="memory-title">${targetBadge}${memory.title}</div>
           <div class="memory-meta">${new Date(memory.createdAt).toLocaleString()}</div>
         </div>
         <button class="btn-secondary memory-toggle-btn" data-id="${memory.id}">详情</button>
@@ -910,7 +920,9 @@ async function handleUserQuestion(query) {
       context: contextContent,
       customApiKey: customApiKey || undefined,
       user_id: userId,
-      current_stage: currentStage
+      current_stage: currentStage,
+      // v2.3.1: 销冠对话 target=qa（智能问答业务知识库）
+      target: "qa"
     };
 
     const response = await fetch(apiUrl, {

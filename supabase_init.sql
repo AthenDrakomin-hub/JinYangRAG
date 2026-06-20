@@ -78,3 +78,13 @@ ON CONFLICT DO NOTHING;
 SELECT
   (SELECT count(*) FROM documents WHERE current_stage = 'STAGE_SPEECH') AS speech_docs,
   (SELECT count(*) FROM speech_history) AS speech_history_count;
+
+-- ============== v2.3.1: 加 target 字段（业务目标分离：智能问答 vs 话术生成）==============
+-- target='qa'     → 智能问答（销冠/RAG）专用，业务知识库
+-- target='speech' → 话术生成（STAGE_SPEECH）专用，群运营文档
+-- 默认 'speech' 是为了兼容老数据（v2.3.0 之前的 STAGE_SPEECH 文档自动归类为 speech）
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS target TEXT NOT NULL DEFAULT 'speech';
+
+-- target + user_id 联合索引，加速检索隔离
+CREATE INDEX IF NOT EXISTS idx_documents_target_user
+  ON documents (target, user_id);

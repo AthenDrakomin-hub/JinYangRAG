@@ -281,6 +281,8 @@ async function handleUserQuestion(query) {
       customApiKey: customApiKey || undefined,
       user_id: userId,
       // v2.3.0: 销冠对话不传 current_stage，后端走 DEFAULT（统一销冠 prompt）
+      // v2.3.1: 销冠对话 target=qa（智能问答业务知识库）
+      target: "qa"
     };
 
     const response = await fetch(apiUrl, {
@@ -497,7 +499,9 @@ function initSpeechUI() {
         const apiUrl = settings.apiUrl || defaultApiUrl;
         const userId = settings.userId || "system_sales_default";
         // v2.3.0: 上传阶段下拉已删除，统一 hardcode STAGE_SPEECH
+        // v2.3.1: 业务目标 hardcode speech（话术生成）
         const currentStage = "STAGE_SPEECH";
+        const target = "speech";
         const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
         const res = await fetch(endpoint, {
           method: "POST",
@@ -505,7 +509,8 @@ function initSpeechUI() {
           body: JSON.stringify({
             content,
             user_id: userId,
-            current_stage: currentStage
+            current_stage: currentStage,
+            target
           })
         });
         const ct = res.headers.get("content-type") || "";
@@ -522,7 +527,7 @@ function initSpeechUI() {
           statusEl.style.color = "#ef4444";
           return;
         }
-        statusEl.textContent = `✅ 已上传：${file.name} → ${currentStage}（标签：${(data.tags || []).join(", ") || "无"}）`;
+        statusEl.textContent = `✅ 已上传：${file.name} → ${target}（标签：${(data.tags || []).join(", ") || "无"}）`;
         statusEl.style.color = "#10b981";
         fileInput.value = "";
         await fetchCloudMemories();
@@ -532,6 +537,71 @@ function initSpeechUI() {
       } finally {
         uploadDocBtn.disabled = false;
         uploadDocBtn.textContent = "上传到 Supabase";
+      }
+    });
+  }
+
+  // v2.3.1: 智能问答业务知识上传（target=qa）— 与记忆库 tab 上传分库隔离
+  const uploadQaDocBtn = document.getElementById("upload-qa-doc-btn");
+  if (uploadQaDocBtn) {
+    uploadQaDocBtn.addEventListener("click", async () => {
+      const fileInput = document.getElementById("upload-qa-doc-input");
+      const statusEl = document.getElementById("upload-qa-status");
+      const file = fileInput && fileInput.files[0];
+      if (!file) {
+        statusEl.textContent = "⚠️ 请先选一个 .txt 或 .md 文件";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        statusEl.textContent = "⚠️ 文件太大（>5MB），请拆分后重试";
+        statusEl.style.color = "#ef4444";
+        return;
+      }
+      uploadQaDocBtn.disabled = true;
+      uploadQaDocBtn.textContent = "上传中...";
+      statusEl.textContent = "⏳ 正在读取文件并计算 Embedding...";
+      statusEl.style.color = "var(--text-secondary)";
+      try {
+        const content = await file.text();
+        const settings = await getExtensionSettings();
+        const apiUrl = settings.apiUrl || defaultApiUrl;
+        const userId = settings.userId || "system_sales_default";
+        // v2.3.1: 业务知识库 hardcode target=qa
+        const target = "qa";
+        const endpoint = buildBackendEndpoint(apiUrl, "api/memory/save");
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            user_id: userId,
+            target
+          })
+        });
+        const ct = res.headers.get("content-type") || "";
+        if (!ct.includes("application/json")) {
+          const txt = await res.text();
+          statusEl.textContent = `❌ 后端返回非 JSON (HTTP ${res.status})：${txt.slice(0, 120)}`;
+          statusEl.style.color = "#ef4444";
+          return;
+        }
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          statusEl.textContent = `❌ 失败：${data.error || "未知错误"}`;
+          statusEl.style.color = "#ef4444";
+          return;
+        }
+        statusEl.textContent = `✅ 已上传：${file.name} → ${target}（标签：${(data.tags || []).join(", ") || "无"}）`;
+        statusEl.style.color = "#10b981";
+        fileInput.value = "";
+        await fetchCloudMemories();
+      } catch (e) {
+        statusEl.textContent = `❌ 错误：${e.message}`;
+        statusEl.style.color = "#ef4444";
+      } finally {
+        uploadQaDocBtn.disabled = false;
+        uploadQaDocBtn.textContent = "上传到业务知识库";
       }
     });
   }
@@ -551,7 +621,8 @@ async function loadSpeechDocStatus() {
     const resp = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stage: "STAGE_SPEECH" })
+      // v2.3.1: 改用 target='speech' 过滤（target 优先于 stage，后端逻辑）
+      body: JSON.stringify({ target: "speech" })
     });
     if (!resp.ok) {
       docText.textContent = `文档拉取失败 (${resp.status})，后端未配置 Supabase`;
@@ -848,10 +919,17 @@ function renderMemories() {
     const isCloud = memory.source === "Supabase";
     const card = document.createElement("div");
     card.className = "memory-card";
+    // v2.3.1: 业务目标 badge — qa 绿色（业务知识），speech 紫色（群运营文档）
+    const rawTarget = (memory.target || "").toString().toLowerCase();
+    const targetBadge = rawTarget === "qa"
+      ? '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#10b981; color:#fff; margin-right:6px; vertical-align:middle;">📚 业务知识</span>'
+      : rawTarget === "speech"
+        ? '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#8b5cf6; color:#fff; margin-right:6px; vertical-align:middle;">🎭 群运营文档</span>'
+        : '<span style="display:inline-block; padding:1px 6px; font-size:10px; border-radius:8px; background-color:#6b7280; color:#fff; margin-right:6px; vertical-align:middle;">未知</span>';
     card.innerHTML = `
       <div class="memory-card-header">
         <div>
-          <div class="memory-title">${memory.title}</div>
+          <div class="memory-title">${targetBadge}${memory.title}</div>
           <div class="memory-meta">${new Date(memory.createdAt).toLocaleString()}</div>
         </div>
         <div class="memory-card-actions">
@@ -937,6 +1015,8 @@ function persistMemory(query, answer, sources) {
     title: query.length > 50 ? `${query.slice(0, 50)}...` : query,
     snippet: summary,
     source: sources && sources.length > 0 ? sources[0].chunk.url || "当前网页" : "当前网页",
+    // v2.3.1: 本地浏览器记忆无 target 概念，给默认值 "qa"（与云端业务知识一致）
+    target: "qa",
     createdAt: new Date().toISOString()
   };
   memoryItems.unshift(memory);
@@ -970,6 +1050,7 @@ async function fetchCloudMemories() {
         title: item.url || `Supabase 记忆 ${new Date(item.created_at || item.createdAt || Date.now()).toLocaleString()}`,
         snippet: item.content ? String(item.content).slice(0, 140) : "(无内容摘要)",
         source: "Supabase",
+        target: item.target || "",  // v2.3.1: 透传 target 字段
         createdAt: item.created_at || item.createdAt || new Date().toISOString()
       }));
     } else {
