@@ -326,7 +326,7 @@ function appendMessageBubble(sender, text, sources = []) {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = sender === "user" ? "您提问" : "Agnes AI 助手";
+  senderLabel.textContent = sender === "user" ? "您提问" : "阳阳";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");
@@ -372,7 +372,7 @@ function appendLoadingBubble() {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = "Agnes AI正在计算回复...";
+  senderLabel.textContent = "阳阳正在计算回复...";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");
@@ -1102,7 +1102,7 @@ function setupUIEventHandlers() {
           </div>
           <h2 style="margin: 4px 0 0 0; font-size: 15px; font-weight: 600;">欢迎使用 Jin Yang RAG</h2>
           <p>我们已从当前网页提取出能提取的全部正文，并在本地浏览器拆分为 <strong id="chunk-count">${webpageChunks.length}</strong> 个语义分块片段。</p>
-          <p style="font-size: 12px;">在下方提问，我们将利用本地相似度计算找出最相关的 Top 3 片段指引 Agnes-2.0-Flash 完成核心双路 RAG 智能问答！</p>
+          <p style="font-size: 12px;">在下方提问，我们将利用本地相似度计算找出最相关的 Top 3 片段</p>
         </div>
       `;
     });

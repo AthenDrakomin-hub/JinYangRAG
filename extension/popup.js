@@ -948,7 +948,7 @@ function appendMessageBubble(sender, text, sources = []) {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = sender === "user" ? "您提问" : "Agnes AI";
+  senderLabel.textContent = sender === "user" ? "您提问" : "阳阳";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");
@@ -990,7 +990,7 @@ function appendLoadingBubble() {
 
   const senderLabel = document.createElement("span");
   senderLabel.className = "message-sender";
-  senderLabel.textContent = "Agnes AI 思考中...";
+  senderLabel.textContent = "阳阳 思考中...";
   bubble.appendChild(senderLabel);
 
   const contentDiv = document.createElement("div");
