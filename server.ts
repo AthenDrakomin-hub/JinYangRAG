@@ -1614,16 +1614,23 @@ ${memoryContext}
         query = query.ilike("content", `%${searchQuery.trim()}%`);
       }
 
-      // v2.3.1: target 列缺失降级（如果 target 过滤失败，自动 retry 去除 target 过滤）
+      // v2.3.1: target 列缺失降级（SELECT 中含 target 字段；表里没这列会失败 → 降级重试）
       let data: any = null;
       let error: any = null;
       const result = await query.order("created_at", { ascending: false }).limit(100);
       data = result.data;
       error = result.error;
-      if (error && target && target.trim() !== "" && (error.message.includes("target") || error.message.includes("column"))) {
-        console.warn("[Memory List] Documents 表缺少 'target' 字段，自动降级去除 target 过滤...");
+      // 触发降级：(1) target filter 失败 (2) SELECT 中 target 列不存在
+      if (error && (error.message.includes("target") || error.message.includes("column"))) {
+        console.warn("[Memory List] Documents 表缺少 'target' 字段，自动降级去除 target 过滤 + 选择列...");
         let retryQuery = supabase.from("documents").select("id, content, url, created_at, current_stage");
-        if (stage && stage.trim() !== "") {
+        // 保留 stage 过滤（向后兼容）
+        if (target && target.trim() === "") {
+          // 空字符串视同未传
+        } else if (target && target.trim() !== "") {
+          // target 传了但列不存在 → 不再加 target 过滤
+          console.warn("[Memory List] 已忽略 target 过滤（列不存在）");
+        } else if (stage && stage.trim() !== "") {
           retryQuery = retryQuery.eq("current_stage", stage.trim());
         }
         if (searchQuery && searchQuery.trim() !== "") {
