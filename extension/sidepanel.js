@@ -746,7 +746,18 @@ function parseSpeechLines(text) {
       lines.push({ role, content });
     }
   }
+  // v2.3.2 兜底：解析不到 [角色] 时按行处理（适配 STAGE_SPEECH 纯话术模式）
+  if (lines.length === 0 && text && text.trim()) {
+    const rawLines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    rawLines.forEach(content => {
+      if (content) lines.push({ role: "群友", content });
+    });
+  }
   return lines;
+}
+
+function isFallbackSpeechMode(lines) {
+  return lines.length > 0 && lines.every(l => l.role === "群友");
 }
 
 function renderSpeechResults(lines, rawData) {
@@ -757,7 +768,9 @@ function renderSpeechResults(lines, rawData) {
   const meta = document.createElement("div");
   meta.style.cssText = "font-size:11px; color:var(--text-secondary); padding: 6px 0; display:flex; justify-content:space-between; align-items:center;";
   const stageTag = (rawData && rawData.stage) || SPEECH_STAGE;
-  meta.innerHTML = `<span>共 ${lines.length} 条 / 已识别 ${new Set(lines.map(l => l.role)).size} 个角色</span><span style="font-family:monospace; font-size:10px;">${stageTag}</span>`;
+  const roleCount = new Set(lines.map(l => l.role)).size;
+  const roleLabel = isFallbackSpeechMode(lines) ? "纯话术模式" : `已识别 ${roleCount} 个角色`;
+  meta.innerHTML = `<span>共 ${lines.length} 条 / ${roleLabel}</span><span style="font-family:monospace; font-size:10px;">${stageTag}</span>`;
   results.appendChild(meta);
 
   const grouped = {};
@@ -804,13 +817,16 @@ function copySpeechLine(idx) {
   const lines = window.__lastSpeechLines || [];
   const target = lines[idx];
   if (!target) return;
-  copyToClipboard(`[${target.role}] ${target.content}`);
+  const text = isFallbackSpeechMode(lines) ? target.content : `[${target.role}] ${target.content}`;
+  copyToClipboard(text);
 }
 
 function copyAllSpeech() {
   const lines = window.__lastSpeechLines || [];
   if (!lines.length) return;
-  const text = lines.map(l => `[${l.role}] ${l.content}`).join("\n");
+  const text = isFallbackSpeechMode(lines)
+    ? lines.map(l => l.content).join("\n")
+    : lines.map(l => `[${l.role}] ${l.content}`).join("\n");
   copyToClipboard(text);
 }
 
